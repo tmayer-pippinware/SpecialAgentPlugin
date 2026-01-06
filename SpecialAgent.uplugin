@@ -1,0 +1,40 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "SpecialAgent",
+	"Description": "MCP Server Plugin for Unreal Engine 5 - Enables LLM control of UE5 via Model Context Protocol",
+	"Category": "AI.MCP",
+	"CreatedBy": "Artisan Gameworks Inc.",
+	"CreatedByURL": "https://www.artisangameworks.com",
+	"DocsURL": "https://github.com/ArtisanGameworks/SpecialAgentPlugin",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "SpecialAgent",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64",
+				"Mac",
+				"Linux"
+			]
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "PythonScriptPlugin",
+			"Enabled": true
+		},
+		{
+			"Name": "EditorScriptingUtilities",
+			"Enabled": true
+		}
+	]
+}
+
