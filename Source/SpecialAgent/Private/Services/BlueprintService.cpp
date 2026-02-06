@@ -16,6 +16,7 @@
 #include "K2Node_EditablePinBase.h"
 #include "K2Node_Event.h"
 #include "K2Node_FunctionEntry.h"
+#include "K2Node_FunctionResult.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
 #include "EdGraphSchema_K2.h"
@@ -1353,6 +1354,373 @@ namespace
 
 		return ComponentObj;
 	}
+
+	enum class EFunctionParamDirection : uint8
+	{
+		Input,
+		Output
+	};
+
+	static FString FunctionParamDirectionToString(const EFunctionParamDirection Direction)
+	{
+		return Direction == EFunctionParamDirection::Output ? TEXT("output") : TEXT("input");
+	}
+
+	static bool ParseFunctionParamDirection(const FString& DirectionName, EFunctionParamDirection& OutDirection, FString& OutError)
+	{
+		const FString Normalized = DirectionName.TrimStartAndEnd().ToLower();
+		if (Normalized.IsEmpty() || Normalized == TEXT("input") || Normalized == TEXT("in"))
+		{
+			OutDirection = EFunctionParamDirection::Input;
+			return true;
+		}
+		if (Normalized == TEXT("output") || Normalized == TEXT("out"))
+		{
+			OutDirection = EFunctionParamDirection::Output;
+			return true;
+		}
+
+		OutError = FString::Printf(TEXT("Unsupported direction '%s'. Supported: input, output"), *DirectionName);
+		return false;
+	}
+
+	static bool ResolvePinTypeFromTypeSpec(
+		const FString& RequestedType,
+		const FString& TypeReferencePath,
+		const bool bHasContainerTypeOverride,
+		const EPinContainerType ContainerTypeOverride,
+		const bool bHasMapKeyType,
+		const FString& MapKeyTypeName,
+		const FString& MapKeyTypeReferencePath,
+		FEdGraphPinType& OutPinType,
+		FString& OutError
+	)
+	{
+		FString ParsedValueTypeName;
+		FString ParsedMapKeyTypeName;
+		EPinContainerType ParsedContainerType = EPinContainerType::None;
+		if (!ParseContainerFromVariableType(RequestedType, ParsedValueTypeName, ParsedContainerType, ParsedMapKeyTypeName, OutError))
+		{
+			return false;
+		}
+
+		const EPinContainerType FinalContainerType = bHasContainerTypeOverride ? ContainerTypeOverride : ParsedContainerType;
+		const FString ValueTypeName = ParsedValueTypeName.TrimStartAndEnd();
+		if (ValueTypeName.IsEmpty())
+		{
+			OutError = TEXT("Resolved type is empty");
+			return false;
+		}
+
+		FEdGraphPinType ValuePinType;
+		if (!BuildPinType(ValueTypeName, TypeReferencePath, ValuePinType, OutError))
+		{
+			return false;
+		}
+		if (ValuePinType.ContainerType != EPinContainerType::None)
+		{
+			OutError = TEXT("Nested container types are not supported");
+			return false;
+		}
+
+		OutPinType = ValuePinType;
+		OutPinType.ContainerType = FinalContainerType;
+		OutPinType.PinValueType = FEdGraphTerminalType();
+
+		if (FinalContainerType == EPinContainerType::Map)
+		{
+			const FString EffectiveMapKeyTypeName = bHasMapKeyType ? MapKeyTypeName.TrimStartAndEnd() : ParsedMapKeyTypeName.TrimStartAndEnd();
+			if (EffectiveMapKeyTypeName.IsEmpty())
+			{
+				OutError = TEXT("Map types require map_key_type (or map<key_type,value_type> syntax)");
+				return false;
+			}
+
+			FEdGraphPinType KeyPinType;
+			if (!BuildPinType(EffectiveMapKeyTypeName, MapKeyTypeReferencePath, KeyPinType, OutError))
+			{
+				return false;
+			}
+			if (KeyPinType.ContainerType != EPinContainerType::None)
+			{
+				OutError = TEXT("Map key type cannot be a container");
+				return false;
+			}
+
+			OutPinType.PinCategory = KeyPinType.PinCategory;
+			OutPinType.PinSubCategory = KeyPinType.PinSubCategory;
+			OutPinType.PinSubCategoryObject = KeyPinType.PinSubCategoryObject;
+			OutPinType.PinSubCategoryMemberReference = KeyPinType.PinSubCategoryMemberReference;
+			OutPinType.bIsReference = KeyPinType.bIsReference;
+			OutPinType.bIsConst = KeyPinType.bIsConst;
+			OutPinType.bIsWeakPointer = KeyPinType.bIsWeakPointer;
+			OutPinType.bIsUObjectWrapper = KeyPinType.bIsUObjectWrapper;
+			OutPinType.bSerializeAsSinglePrecisionFloat = KeyPinType.bSerializeAsSinglePrecisionFloat;
+
+			OutPinType.PinValueType.TerminalCategory = ValuePinType.PinCategory;
+			OutPinType.PinValueType.TerminalSubCategory = ValuePinType.PinSubCategory;
+			OutPinType.PinValueType.TerminalSubCategoryObject = ValuePinType.PinSubCategoryObject;
+			OutPinType.PinValueType.bTerminalIsConst = ValuePinType.bIsConst;
+			OutPinType.PinValueType.bTerminalIsWeakPointer = ValuePinType.bIsWeakPointer;
+			OutPinType.PinValueType.bTerminalIsUObjectWrapper = ValuePinType.bIsUObjectWrapper;
+		}
+
+		return true;
+	}
+
+	static TSharedPtr<FJsonObject> BuildPinTypeJson(const FEdGraphPinType& PinType)
+	{
+		TSharedPtr<FJsonObject> PinTypeObj = MakeShared<FJsonObject>();
+		const FString BaseTypeName = BaseTypeNameFromPinType(PinType);
+
+		PinTypeObj->SetStringField(TEXT("base_type"), BaseTypeName);
+		PinTypeObj->SetStringField(TEXT("container_type"), PinContainerTypeToString(PinType.ContainerType));
+		PinTypeObj->SetBoolField(TEXT("pass_by_reference"), PinType.bIsReference);
+		PinTypeObj->SetBoolField(TEXT("const"), PinType.bIsConst);
+
+		if (PinType.ContainerType == EPinContainerType::Map)
+		{
+			const FString KeyTypeName = BaseTypeName;
+			const FString ValueTypeName = BaseTypeNameFromTerminalType(PinType.PinValueType);
+			PinTypeObj->SetStringField(TEXT("map_key_type"), KeyTypeName);
+			PinTypeObj->SetStringField(TEXT("map_value_type"), ValueTypeName);
+			PinTypeObj->SetStringField(TEXT("param_type"), FString::Printf(TEXT("map<%s,%s>"), *KeyTypeName, *ValueTypeName));
+
+			if (PinType.PinSubCategoryObject.IsValid())
+			{
+				PinTypeObj->SetStringField(TEXT("map_key_type_reference"), PinType.PinSubCategoryObject->GetPathName());
+			}
+			if (PinType.PinValueType.TerminalSubCategoryObject.IsValid())
+			{
+				PinTypeObj->SetStringField(TEXT("map_value_type_reference"), PinType.PinValueType.TerminalSubCategoryObject->GetPathName());
+			}
+		}
+		else if (PinType.ContainerType == EPinContainerType::Array)
+		{
+			PinTypeObj->SetStringField(TEXT("param_type"), FString::Printf(TEXT("array<%s>"), *BaseTypeName));
+		}
+		else if (PinType.ContainerType == EPinContainerType::Set)
+		{
+			PinTypeObj->SetStringField(TEXT("param_type"), FString::Printf(TEXT("set<%s>"), *BaseTypeName));
+		}
+		else
+		{
+			PinTypeObj->SetStringField(TEXT("param_type"), BaseTypeName);
+		}
+
+		if (PinType.PinSubCategoryObject.IsValid())
+		{
+			PinTypeObj->SetStringField(TEXT("type_reference"), PinType.PinSubCategoryObject->GetPathName());
+		}
+
+		return PinTypeObj;
+	}
+
+	static TSharedPtr<FJsonObject> BuildUserPinJson(const FUserPinInfo& PinInfo, const EFunctionParamDirection Direction)
+	{
+		TSharedPtr<FJsonObject> ParamObj = BuildPinTypeJson(PinInfo.PinType);
+		ParamObj->SetStringField(TEXT("param_name"), PinInfo.PinName.ToString());
+		ParamObj->SetStringField(TEXT("direction"), FunctionParamDirectionToString(Direction));
+		ParamObj->SetStringField(TEXT("default_value"), PinInfo.PinDefaultValue);
+		return ParamObj;
+	}
+
+	static TSharedPtr<FJsonObject> BuildFunctionFlagsJson(const UK2Node_FunctionEntry* FunctionEntry)
+	{
+		TSharedPtr<FJsonObject> FlagsObj = MakeShared<FJsonObject>();
+		if (!FunctionEntry)
+		{
+			FlagsObj->SetBoolField(TEXT("pure"), false);
+			FlagsObj->SetBoolField(TEXT("const"), false);
+			FlagsObj->SetBoolField(TEXT("call_in_editor"), false);
+			FlagsObj->SetStringField(TEXT("access"), TEXT("public"));
+			return FlagsObj;
+		}
+
+		const uint32 FunctionFlags = FunctionEntry->GetFunctionFlags();
+		FlagsObj->SetBoolField(TEXT("pure"), (FunctionFlags & FUNC_BlueprintPure) != 0);
+		FlagsObj->SetBoolField(TEXT("const"), (FunctionFlags & FUNC_Const) != 0);
+		FlagsObj->SetBoolField(TEXT("call_in_editor"), FunctionEntry->MetaData.bCallInEditor);
+		FlagsObj->SetStringField(TEXT("access"), AccessSpecifierToString(FunctionFlags & FUNC_AccessSpecifiers));
+		return FlagsObj;
+	}
+
+	static TArray<UK2Node_EditablePinBase*> GatherAllResultNodes(UK2Node_EditablePinBase* TargetNode)
+	{
+		TArray<UK2Node_EditablePinBase*> ResultNodes;
+		if (UK2Node_FunctionResult* FunctionResultNode = Cast<UK2Node_FunctionResult>(TargetNode))
+		{
+			for (UK2Node_FunctionResult* Node : FunctionResultNode->GetAllResultNodes())
+			{
+				if (Node)
+				{
+					ResultNodes.Add(Node);
+				}
+			}
+		}
+		else if (TargetNode)
+		{
+			ResultNodes.Add(TargetNode);
+		}
+
+		return ResultNodes;
+	}
+
+	static void RefreshEditablePinNode(UK2Node_EditablePinBase* Node)
+	{
+		if (!Node)
+		{
+			return;
+		}
+
+		const bool bDisableOrphanPinSaving = Node->bDisableOrphanPinSaving;
+		Node->bDisableOrphanPinSaving = true;
+		Node->ReconstructNode();
+		Node->bDisableOrphanPinSaving = bDisableOrphanPinSaving;
+
+		if (const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>())
+		{
+			K2Schema->HandleParameterDefaultValueChanged(Node);
+		}
+	}
+
+	static UEdGraph* FindFunctionGraphByName(UBlueprint* Blueprint, const FString& FunctionName)
+	{
+		if (!Blueprint)
+		{
+			return nullptr;
+		}
+
+		for (UEdGraph* Graph : Blueprint->FunctionGraphs)
+		{
+			if (Graph && Graph->GetName().Equals(FunctionName, ESearchCase::IgnoreCase))
+			{
+				return Graph;
+			}
+		}
+
+		return nullptr;
+	}
+
+	static UEdGraph* FindMacroGraphByName(UBlueprint* Blueprint, const FString& MacroName)
+	{
+		if (!Blueprint)
+		{
+			return nullptr;
+		}
+
+		for (UEdGraph* Graph : Blueprint->MacroGraphs)
+		{
+			if (Graph && Graph->GetName().Equals(MacroName, ESearchCase::IgnoreCase))
+			{
+				return Graph;
+			}
+		}
+
+		return nullptr;
+	}
+
+	static int32 FindDispatcherVariableIndex(UBlueprint* Blueprint, const FName DispatcherName)
+	{
+		if (!Blueprint || DispatcherName.IsNone())
+		{
+			return INDEX_NONE;
+		}
+
+		const int32 VariableIndex = FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, DispatcherName);
+		if (VariableIndex == INDEX_NONE)
+		{
+			return INDEX_NONE;
+		}
+		if (Blueprint->NewVariables[VariableIndex].VarType.PinCategory != UEdGraphSchema_K2::PC_MCDelegate)
+		{
+			return INDEX_NONE;
+		}
+		return VariableIndex;
+	}
+
+	static TSharedPtr<FJsonObject> BuildFunctionJson(UBlueprint* Blueprint, UEdGraph* FunctionGraph)
+	{
+		TSharedPtr<FJsonObject> FunctionObj = BuildGraphJson(Blueprint, FunctionGraph);
+		if (!FunctionGraph)
+		{
+			return FunctionObj;
+		}
+
+		FunctionObj->SetStringField(TEXT("function_name"), FunctionGraph->GetName());
+
+		UK2Node_FunctionEntry* FunctionEntry = Cast<UK2Node_FunctionEntry>(FBlueprintEditorUtils::GetEntryNode(FunctionGraph));
+		FunctionObj->SetObjectField(TEXT("flags"), BuildFunctionFlagsJson(FunctionEntry));
+
+		TArray<TSharedPtr<FJsonValue>> InputParamsJson;
+		if (FunctionEntry)
+		{
+			for (const TSharedPtr<FUserPinInfo>& UserPin : FunctionEntry->UserDefinedPins)
+			{
+				if (UserPin.IsValid())
+				{
+					InputParamsJson.Add(MakeShared<FJsonValueObject>(BuildUserPinJson(*UserPin.Get(), EFunctionParamDirection::Input)));
+				}
+			}
+		}
+		FunctionObj->SetArrayField(TEXT("input_params"), InputParamsJson);
+
+		TArray<UK2Node_FunctionResult*> ResultNodes;
+		FunctionGraph->GetNodesOfClass(ResultNodes);
+		UK2Node_FunctionResult* PrimaryResultNode = ResultNodes.Num() > 0 ? ResultNodes[0] : nullptr;
+
+		TArray<TSharedPtr<FJsonValue>> OutputParamsJson;
+		if (PrimaryResultNode)
+		{
+			for (const TSharedPtr<FUserPinInfo>& UserPin : PrimaryResultNode->UserDefinedPins)
+			{
+				if (UserPin.IsValid())
+				{
+					TSharedPtr<FJsonObject> PinJson = BuildUserPinJson(*UserPin.Get(), EFunctionParamDirection::Output);
+					if (UserPin->PinName == UEdGraphSchema_K2::PN_ReturnValue)
+					{
+						FunctionObj->SetObjectField(TEXT("return_pin"), PinJson);
+					}
+					OutputParamsJson.Add(MakeShared<FJsonValueObject>(PinJson));
+				}
+			}
+		}
+		FunctionObj->SetArrayField(TEXT("output_params"), OutputParamsJson);
+		return FunctionObj;
+	}
+
+	static TSharedPtr<FJsonObject> BuildDispatcherJson(UBlueprint* Blueprint, const FBPVariableDescription& Variable)
+	{
+		TSharedPtr<FJsonObject> DispatcherObj = MakeShared<FJsonObject>();
+		DispatcherObj->SetStringField(TEXT("dispatcher_name"), Variable.VarName.ToString());
+		DispatcherObj->SetObjectField(TEXT("variable"), BuildVariableJson(Blueprint, Variable));
+
+		UEdGraph* SignatureGraph = FBlueprintEditorUtils::GetDelegateSignatureGraphByName(Blueprint, Variable.VarName);
+		if (SignatureGraph)
+		{
+			DispatcherObj->SetStringField(TEXT("signature_graph_name"), SignatureGraph->GetName());
+			DispatcherObj->SetStringField(TEXT("signature_graph_path"), SignatureGraph->GetPathName());
+		}
+		else
+		{
+			DispatcherObj->SetStringField(TEXT("signature_graph_name"), TEXT(""));
+			DispatcherObj->SetStringField(TEXT("signature_graph_path"), TEXT(""));
+		}
+
+		TArray<TSharedPtr<FJsonValue>> SignatureParamsJson;
+		if (UK2Node_FunctionEntry* EntryNode = SignatureGraph ? Cast<UK2Node_FunctionEntry>(FBlueprintEditorUtils::GetEntryNode(SignatureGraph)) : nullptr)
+		{
+			for (const TSharedPtr<FUserPinInfo>& UserPin : EntryNode->UserDefinedPins)
+			{
+				if (UserPin.IsValid())
+				{
+					SignatureParamsJson.Add(MakeShared<FJsonValueObject>(BuildUserPinJson(*UserPin.Get(), EFunctionParamDirection::Input)));
+				}
+			}
+		}
+		DispatcherObj->SetArrayField(TEXT("signature_params"), SignatureParamsJson);
+		return DispatcherObj;
+	}
 }
 
 FBlueprintService::FBlueprintService()
@@ -2289,6 +2657,403 @@ TArray<FMCPToolInfo> FBlueprintService::GetAvailableTools() const
 
 	{
 		FMCPToolInfo Tool;
+		Tool.Name = TEXT("list_functions");
+		Tool.Description = TEXT("List user-authored Blueprint functions with flags and signature pins.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("create_function");
+		Tool.Description = TEXT("Create a new Blueprint function graph.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Function name."));
+		Tool.Parameters->SetObjectField(TEXT("function_name"), NameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("function_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("delete_function");
+		Tool.Description = TEXT("Delete a Blueprint function graph.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Function name."));
+		Tool.Parameters->SetObjectField(TEXT("function_name"), NameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("function_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("rename_function");
+		Tool.Description = TEXT("Rename a Blueprint function graph.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Existing function name."));
+		Tool.Parameters->SetObjectField(TEXT("function_name"), NameParam);
+
+		TSharedPtr<FJsonObject> NewNameParam = MakeShared<FJsonObject>();
+		NewNameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NewNameParam->SetStringField(TEXT("description"), TEXT("New function name."));
+		Tool.Parameters->SetObjectField(TEXT("new_function_name"), NewNameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("function_name"));
+		Tool.RequiredParams.Add(TEXT("new_function_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("set_function_flags");
+		Tool.Description = TEXT("Set function flags: pure, const, call_in_editor, and access (public/protected/private).");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Function name."));
+		Tool.Parameters->SetObjectField(TEXT("function_name"), NameParam);
+
+		TSharedPtr<FJsonObject> PureParam = MakeShared<FJsonObject>();
+		PureParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		PureParam->SetStringField(TEXT("description"), TEXT("Optional pure flag."));
+		Tool.Parameters->SetObjectField(TEXT("pure"), PureParam);
+
+		TSharedPtr<FJsonObject> ConstParam = MakeShared<FJsonObject>();
+		ConstParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		ConstParam->SetStringField(TEXT("description"), TEXT("Optional const flag."));
+		Tool.Parameters->SetObjectField(TEXT("const"), ConstParam);
+
+		TSharedPtr<FJsonObject> CallInEditorParam = MakeShared<FJsonObject>();
+		CallInEditorParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		CallInEditorParam->SetStringField(TEXT("description"), TEXT("Optional call-in-editor flag."));
+		Tool.Parameters->SetObjectField(TEXT("call_in_editor"), CallInEditorParam);
+
+		TSharedPtr<FJsonObject> AccessParam = MakeShared<FJsonObject>();
+		AccessParam->SetStringField(TEXT("type"), TEXT("string"));
+		AccessParam->SetStringField(TEXT("description"), TEXT("Optional access specifier: public, protected, private."));
+		Tool.Parameters->SetObjectField(TEXT("access"), AccessParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("function_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("add_function_param");
+		Tool.Description = TEXT("Add a function input or output parameter pin.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> FunctionParam = MakeShared<FJsonObject>();
+		FunctionParam->SetStringField(TEXT("type"), TEXT("string"));
+		FunctionParam->SetStringField(TEXT("description"), TEXT("Function name."));
+		Tool.Parameters->SetObjectField(TEXT("function_name"), FunctionParam);
+
+		TSharedPtr<FJsonObject> ParamNameParam = MakeShared<FJsonObject>();
+		ParamNameParam->SetStringField(TEXT("type"), TEXT("string"));
+		ParamNameParam->SetStringField(TEXT("description"), TEXT("Parameter name."));
+		Tool.Parameters->SetObjectField(TEXT("param_name"), ParamNameParam);
+
+		TSharedPtr<FJsonObject> ParamTypeParam = MakeShared<FJsonObject>();
+		ParamTypeParam->SetStringField(TEXT("type"), TEXT("string"));
+		ParamTypeParam->SetStringField(TEXT("description"), TEXT("Parameter type (supports array<T>, set<T>, map<K,V>)."));
+		Tool.Parameters->SetObjectField(TEXT("param_type"), ParamTypeParam);
+
+		TSharedPtr<FJsonObject> DirectionParam = MakeShared<FJsonObject>();
+		DirectionParam->SetStringField(TEXT("type"), TEXT("string"));
+		DirectionParam->SetStringField(TEXT("description"), TEXT("Optional direction: input (default) or output."));
+		Tool.Parameters->SetObjectField(TEXT("direction"), DirectionParam);
+
+		TSharedPtr<FJsonObject> TypeRefParam = MakeShared<FJsonObject>();
+		TypeRefParam->SetStringField(TEXT("type"), TEXT("string"));
+		TypeRefParam->SetStringField(TEXT("description"), TEXT("Optional type reference path for object/class/enum/struct/interface types."));
+		Tool.Parameters->SetObjectField(TEXT("type_reference"), TypeRefParam);
+
+		TSharedPtr<FJsonObject> ContainerParam = MakeShared<FJsonObject>();
+		ContainerParam->SetStringField(TEXT("type"), TEXT("string"));
+		ContainerParam->SetStringField(TEXT("description"), TEXT("Optional container override: none, array, set, map."));
+		Tool.Parameters->SetObjectField(TEXT("container_type"), ContainerParam);
+
+		TSharedPtr<FJsonObject> MapKeyTypeParam = MakeShared<FJsonObject>();
+		MapKeyTypeParam->SetStringField(TEXT("type"), TEXT("string"));
+		MapKeyTypeParam->SetStringField(TEXT("description"), TEXT("Optional map key type when using map container."));
+		Tool.Parameters->SetObjectField(TEXT("map_key_type"), MapKeyTypeParam);
+
+		TSharedPtr<FJsonObject> MapKeyRefParam = MakeShared<FJsonObject>();
+		MapKeyRefParam->SetStringField(TEXT("type"), TEXT("string"));
+		MapKeyRefParam->SetStringField(TEXT("description"), TEXT("Optional referenced type path for map key type."));
+		Tool.Parameters->SetObjectField(TEXT("map_key_type_reference"), MapKeyRefParam);
+
+		TSharedPtr<FJsonObject> RefParam = MakeShared<FJsonObject>();
+		RefParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		RefParam->SetStringField(TEXT("description"), TEXT("Optional pass-by-reference flag (input params only)."));
+		Tool.Parameters->SetObjectField(TEXT("pass_by_reference"), RefParam);
+
+		TSharedPtr<FJsonObject> ConstParam = MakeShared<FJsonObject>();
+		ConstParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		ConstParam->SetStringField(TEXT("description"), TEXT("Optional const flag."));
+		Tool.Parameters->SetObjectField(TEXT("const"), ConstParam);
+
+		TSharedPtr<FJsonObject> DefaultParam = MakeShared<FJsonObject>();
+		DefaultParam->SetStringField(TEXT("type"), TEXT("string"));
+		DefaultParam->SetStringField(TEXT("description"), TEXT("Optional default value for input params."));
+		Tool.Parameters->SetObjectField(TEXT("default_value"), DefaultParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("function_name"));
+		Tool.RequiredParams.Add(TEXT("param_name"));
+		Tool.RequiredParams.Add(TEXT("param_type"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("remove_function_param");
+		Tool.Description = TEXT("Remove a function input or output parameter pin by name.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> FunctionParam = MakeShared<FJsonObject>();
+		FunctionParam->SetStringField(TEXT("type"), TEXT("string"));
+		FunctionParam->SetStringField(TEXT("description"), TEXT("Function name."));
+		Tool.Parameters->SetObjectField(TEXT("function_name"), FunctionParam);
+
+		TSharedPtr<FJsonObject> ParamNameParam = MakeShared<FJsonObject>();
+		ParamNameParam->SetStringField(TEXT("type"), TEXT("string"));
+		ParamNameParam->SetStringField(TEXT("description"), TEXT("Parameter name to remove."));
+		Tool.Parameters->SetObjectField(TEXT("param_name"), ParamNameParam);
+
+		TSharedPtr<FJsonObject> DirectionParam = MakeShared<FJsonObject>();
+		DirectionParam->SetStringField(TEXT("type"), TEXT("string"));
+		DirectionParam->SetStringField(TEXT("description"), TEXT("Optional direction filter: input or output."));
+		Tool.Parameters->SetObjectField(TEXT("direction"), DirectionParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("function_name"));
+		Tool.RequiredParams.Add(TEXT("param_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("set_function_return");
+		Tool.Description = TEXT("Create/update/remove a function return pin.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> FunctionParam = MakeShared<FJsonObject>();
+		FunctionParam->SetStringField(TEXT("type"), TEXT("string"));
+		FunctionParam->SetStringField(TEXT("description"), TEXT("Function name."));
+		Tool.Parameters->SetObjectField(TEXT("function_name"), FunctionParam);
+
+		TSharedPtr<FJsonObject> ClearParam = MakeShared<FJsonObject>();
+		ClearParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		ClearParam->SetStringField(TEXT("description"), TEXT("True to remove the return pin by return_name (default ReturnValue)."));
+		Tool.Parameters->SetObjectField(TEXT("clear"), ClearParam);
+
+		TSharedPtr<FJsonObject> ReturnNameParam = MakeShared<FJsonObject>();
+		ReturnNameParam->SetStringField(TEXT("type"), TEXT("string"));
+		ReturnNameParam->SetStringField(TEXT("description"), TEXT("Optional return pin name (default: ReturnValue)."));
+		Tool.Parameters->SetObjectField(TEXT("return_name"), ReturnNameParam);
+
+		TSharedPtr<FJsonObject> ReturnTypeParam = MakeShared<FJsonObject>();
+		ReturnTypeParam->SetStringField(TEXT("type"), TEXT("string"));
+		ReturnTypeParam->SetStringField(TEXT("description"), TEXT("Return type when clear=false (supports array<T>, set<T>, map<K,V>)."));
+		Tool.Parameters->SetObjectField(TEXT("return_type"), ReturnTypeParam);
+
+		TSharedPtr<FJsonObject> TypeRefParam = MakeShared<FJsonObject>();
+		TypeRefParam->SetStringField(TEXT("type"), TEXT("string"));
+		TypeRefParam->SetStringField(TEXT("description"), TEXT("Optional return type reference path."));
+		Tool.Parameters->SetObjectField(TEXT("type_reference"), TypeRefParam);
+
+		TSharedPtr<FJsonObject> ContainerParam = MakeShared<FJsonObject>();
+		ContainerParam->SetStringField(TEXT("type"), TEXT("string"));
+		ContainerParam->SetStringField(TEXT("description"), TEXT("Optional container override: none, array, set, map."));
+		Tool.Parameters->SetObjectField(TEXT("container_type"), ContainerParam);
+
+		TSharedPtr<FJsonObject> MapKeyTypeParam = MakeShared<FJsonObject>();
+		MapKeyTypeParam->SetStringField(TEXT("type"), TEXT("string"));
+		MapKeyTypeParam->SetStringField(TEXT("description"), TEXT("Optional map key type when using map return type."));
+		Tool.Parameters->SetObjectField(TEXT("map_key_type"), MapKeyTypeParam);
+
+		TSharedPtr<FJsonObject> MapKeyRefParam = MakeShared<FJsonObject>();
+		MapKeyRefParam->SetStringField(TEXT("type"), TEXT("string"));
+		MapKeyRefParam->SetStringField(TEXT("description"), TEXT("Optional referenced type path for map key type."));
+		Tool.Parameters->SetObjectField(TEXT("map_key_type_reference"), MapKeyRefParam);
+
+		TSharedPtr<FJsonObject> DefaultParam = MakeShared<FJsonObject>();
+		DefaultParam->SetStringField(TEXT("type"), TEXT("string"));
+		DefaultParam->SetStringField(TEXT("description"), TEXT("Optional default value for the return pin."));
+		Tool.Parameters->SetObjectField(TEXT("default_value"), DefaultParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("function_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("list_macros");
+		Tool.Description = TEXT("List top-level Blueprint macro graphs.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("create_macro");
+		Tool.Description = TEXT("Create a new Blueprint macro graph.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Macro name."));
+		Tool.Parameters->SetObjectField(TEXT("macro_name"), NameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("macro_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("delete_macro");
+		Tool.Description = TEXT("Delete a Blueprint macro graph.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Macro name."));
+		Tool.Parameters->SetObjectField(TEXT("macro_name"), NameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("macro_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("list_event_dispatchers");
+		Tool.Description = TEXT("List Blueprint event dispatchers and their signature parameters.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("create_event_dispatcher");
+		Tool.Description = TEXT("Create a new Blueprint event dispatcher.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Dispatcher name."));
+		Tool.Parameters->SetObjectField(TEXT("dispatcher_name"), NameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("dispatcher_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("set_dispatcher_signature");
+		Tool.Description = TEXT("Replace dispatcher signature parameters with a provided parameter list.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Dispatcher name."));
+		Tool.Parameters->SetObjectField(TEXT("dispatcher_name"), NameParam);
+
+		TSharedPtr<FJsonObject> ParamsParam = MakeShared<FJsonObject>();
+		ParamsParam->SetStringField(TEXT("type"), TEXT("array"));
+		ParamsParam->SetStringField(TEXT("description"), TEXT("Array of signature parameters. Each item supports: param_name, param_type, type_reference, container_type, map_key_type, map_key_type_reference, default_value."));
+		Tool.Parameters->SetObjectField(TEXT("parameters"), ParamsParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("dispatcher_name"));
+		Tool.RequiredParams.Add(TEXT("parameters"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
 		Tool.Name = TEXT("add_event_node");
 		Tool.Description = TEXT("Add an event node to a Blueprint graph (e.g. BeginPlay, Tick).");
 
@@ -2573,6 +3338,20 @@ FMCPResponse FBlueprintService::HandleRequest(const FMCPRequest& Request, const 
 	if (MethodName == TEXT("set_component_property")) return HandleSetComponentProperty(Request);
 	if (MethodName == TEXT("get_component_property")) return HandleGetComponentProperty(Request);
 	if (MethodName == TEXT("set_component_transform_default")) return HandleSetComponentTransformDefault(Request);
+	if (MethodName == TEXT("list_functions")) return HandleListFunctions(Request);
+	if (MethodName == TEXT("create_function")) return HandleCreateFunction(Request);
+	if (MethodName == TEXT("delete_function")) return HandleDeleteFunction(Request);
+	if (MethodName == TEXT("rename_function")) return HandleRenameFunction(Request);
+	if (MethodName == TEXT("set_function_flags")) return HandleSetFunctionFlags(Request);
+	if (MethodName == TEXT("add_function_param")) return HandleAddFunctionParam(Request);
+	if (MethodName == TEXT("remove_function_param")) return HandleRemoveFunctionParam(Request);
+	if (MethodName == TEXT("set_function_return")) return HandleSetFunctionReturn(Request);
+	if (MethodName == TEXT("list_macros")) return HandleListMacros(Request);
+	if (MethodName == TEXT("create_macro")) return HandleCreateMacro(Request);
+	if (MethodName == TEXT("delete_macro")) return HandleDeleteMacro(Request);
+	if (MethodName == TEXT("list_event_dispatchers")) return HandleListEventDispatchers(Request);
+	if (MethodName == TEXT("create_event_dispatcher")) return HandleCreateEventDispatcher(Request);
+	if (MethodName == TEXT("set_dispatcher_signature")) return HandleSetDispatcherSignature(Request);
 	if (MethodName == TEXT("add_event_node")) return HandleAddEventNode(Request);
 	if (MethodName == TEXT("add_call_function_node")) return HandleAddCallFunctionNode(Request);
 	if (MethodName == TEXT("add_variable_get_node")) return HandleAddVariableGetNode(Request);
@@ -6228,6 +7007,1505 @@ FMCPResponse FBlueprintService::HandleSetComponentTransformDefault(const FMCPReq
 		Result->SetBoolField(TEXT("success"), true);
 		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
 		Result->SetObjectField(TEXT("component"), BuildComponentJson(Blueprint, SCS, Node));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleListFunctions(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+
+	auto Task = [BlueprintPath]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		TArray<UEdGraph*> FunctionGraphs;
+		for (UEdGraph* Graph : Blueprint->FunctionGraphs)
+		{
+			if (Graph)
+			{
+				FunctionGraphs.Add(Graph);
+			}
+		}
+		FunctionGraphs.Sort([](const UEdGraph& A, const UEdGraph& B)
+		{
+			return A.GetName().Compare(B.GetName(), ESearchCase::IgnoreCase) < 0;
+		});
+
+		TArray<TSharedPtr<FJsonValue>> FunctionsJson;
+		for (UEdGraph* Graph : FunctionGraphs)
+		{
+			FunctionsJson.Add(MakeShared<FJsonValueObject>(BuildFunctionJson(Blueprint, Graph)));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetArrayField(TEXT("functions"), FunctionsJson);
+		Result->SetNumberField(TEXT("count"), FunctionsJson.Num());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleCreateFunction(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString FunctionName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("function_name"), FunctionName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'function_name'"));
+	}
+
+	auto Task = [BlueprintPath, FunctionName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedFunctionName = FunctionName.TrimStartAndEnd();
+		if (TrimmedFunctionName.IsEmpty())
+		{
+			return Fail(TEXT("function_name must be non-empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		if (ResolveGraph(Blueprint, TrimmedFunctionName))
+		{
+			return Fail(FString::Printf(TEXT("A graph already exists with name: %s"), *TrimmedFunctionName));
+		}
+
+		UEdGraph* NewGraph = UBlueprintEditorLibrary::AddFunctionGraph(Blueprint, TrimmedFunctionName);
+		if (!NewGraph)
+		{
+			return Fail(FString::Printf(TEXT("Failed to create function: %s"), *TrimmedFunctionName));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetObjectField(TEXT("function"), BuildFunctionJson(Blueprint, NewGraph));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleDeleteFunction(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString FunctionName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("function_name"), FunctionName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'function_name'"));
+	}
+
+	auto Task = [BlueprintPath, FunctionName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedFunctionName = FunctionName.TrimStartAndEnd();
+		if (TrimmedFunctionName.IsEmpty())
+		{
+			return Fail(TEXT("function_name must be non-empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* FunctionGraph = FindFunctionGraphByName(Blueprint, TrimmedFunctionName);
+		if (!FunctionGraph)
+		{
+			return Fail(FString::Printf(TEXT("Function not found: %s"), *TrimmedFunctionName));
+		}
+
+		const FString RemovedFunctionName = FunctionGraph->GetName();
+		FBlueprintEditorUtils::RemoveGraph(Blueprint, FunctionGraph, EGraphRemoveFlags::Default);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("removed_function_name"), RemovedFunctionName);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleRenameFunction(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString FunctionName;
+	FString NewFunctionName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("function_name"), FunctionName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'function_name'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("new_function_name"), NewFunctionName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'new_function_name'"));
+	}
+
+	auto Task = [BlueprintPath, FunctionName, NewFunctionName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedFunctionName = FunctionName.TrimStartAndEnd();
+		const FString TrimmedNewFunctionName = NewFunctionName.TrimStartAndEnd();
+		if (TrimmedFunctionName.IsEmpty() || TrimmedNewFunctionName.IsEmpty())
+		{
+			return Fail(TEXT("function_name and new_function_name must be non-empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* FunctionGraph = FindFunctionGraphByName(Blueprint, TrimmedFunctionName);
+		if (!FunctionGraph)
+		{
+			return Fail(FString::Printf(TEXT("Function not found: %s"), *TrimmedFunctionName));
+		}
+
+		if (FunctionGraph->GetName().Equals(TrimmedNewFunctionName, ESearchCase::IgnoreCase))
+		{
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetBoolField(TEXT("changed"), false);
+			Result->SetObjectField(TEXT("function"), BuildFunctionJson(Blueprint, FunctionGraph));
+			return Result;
+		}
+
+		if (ResolveGraph(Blueprint, TrimmedNewFunctionName))
+		{
+			return Fail(FString::Printf(TEXT("A graph already exists with name: %s"), *TrimmedNewFunctionName));
+		}
+
+		const FString OldFunctionName = FunctionGraph->GetName();
+		FBlueprintEditorUtils::RenameGraph(FunctionGraph, TrimmedNewFunctionName);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("old_function_name"), OldFunctionName);
+		Result->SetStringField(TEXT("new_function_name"), FunctionGraph->GetName());
+		Result->SetBoolField(TEXT("changed"), true);
+		Result->SetObjectField(TEXT("function"), BuildFunctionJson(Blueprint, FunctionGraph));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleSetFunctionFlags(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString FunctionName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("function_name"), FunctionName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'function_name'"));
+	}
+
+	bool bPure = false;
+	bool bConst = false;
+	bool bCallInEditor = false;
+	FString AccessName;
+	const bool bHasPure = Request.Params->TryGetBoolField(TEXT("pure"), bPure);
+	const bool bHasConst = Request.Params->TryGetBoolField(TEXT("const"), bConst);
+	const bool bHasCallInEditor = Request.Params->TryGetBoolField(TEXT("call_in_editor"), bCallInEditor);
+	const bool bHasAccess = Request.Params->TryGetStringField(TEXT("access"), AccessName);
+	if (!bHasPure && !bHasConst && !bHasCallInEditor && !bHasAccess)
+	{
+		return InvalidParams(Request.Id, TEXT("Provide at least one of: pure, const, call_in_editor, access"));
+	}
+
+	uint32 ParsedAccessSpecifier = FUNC_Public;
+	if (bHasAccess)
+	{
+		FString AccessError;
+		if (!ParseAccessSpecifier(AccessName, ParsedAccessSpecifier, AccessError))
+		{
+			return InvalidParams(Request.Id, AccessError);
+		}
+	}
+
+	auto Task = [BlueprintPath, FunctionName, bHasPure, bPure, bHasConst, bConst, bHasCallInEditor, bCallInEditor, bHasAccess, ParsedAccessSpecifier]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* FunctionGraph = FindFunctionGraphByName(Blueprint, FunctionName);
+		if (!FunctionGraph)
+		{
+			return Fail(FString::Printf(TEXT("Function not found: %s"), *FunctionName));
+		}
+
+		UK2Node_FunctionEntry* FunctionEntry = Cast<UK2Node_FunctionEntry>(FBlueprintEditorUtils::GetEntryNode(FunctionGraph));
+		if (!FunctionEntry)
+		{
+			return Fail(TEXT("Could not resolve function entry node"));
+		}
+
+		FunctionEntry->Modify();
+		const int32 ExistingExtraFlags = FunctionEntry->GetExtraFlags();
+		int32 UpdatedExtraFlags = ExistingExtraFlags;
+		bool bStructuralChange = false;
+		bool bMetadataChange = false;
+
+		if (bHasPure)
+		{
+			UpdatedExtraFlags = bPure ? (UpdatedExtraFlags | FUNC_BlueprintPure) : (UpdatedExtraFlags & ~FUNC_BlueprintPure);
+		}
+		if (bHasConst)
+		{
+			UpdatedExtraFlags = bConst ? (UpdatedExtraFlags | FUNC_Const) : (UpdatedExtraFlags & ~FUNC_Const);
+		}
+		if (bHasAccess)
+		{
+			UpdatedExtraFlags = (UpdatedExtraFlags & ~FUNC_AccessSpecifiers) | ParsedAccessSpecifier;
+		}
+		if (UpdatedExtraFlags != ExistingExtraFlags)
+		{
+			FunctionEntry->SetExtraFlags(UpdatedExtraFlags);
+			bStructuralChange = true;
+		}
+
+		if (bHasCallInEditor && FunctionEntry->MetaData.bCallInEditor != bCallInEditor)
+		{
+			FunctionEntry->MetaData.bCallInEditor = bCallInEditor;
+			bMetadataChange = true;
+		}
+
+		if (!bStructuralChange && !bMetadataChange)
+		{
+			return Fail(TEXT("No function flag changes were applied"));
+		}
+
+		if (Blueprint->SkeletonGeneratedClass)
+		{
+			if (UFunction* SkeletonFunction = Blueprint->SkeletonGeneratedClass->FindFunctionByName(FunctionGraph->GetFName()))
+			{
+				SkeletonFunction->Modify();
+				uint32 UpdatedFunctionFlags = static_cast<uint32>(SkeletonFunction->FunctionFlags);
+				if (bHasPure)
+				{
+					UpdatedFunctionFlags = bPure ? (UpdatedFunctionFlags | FUNC_BlueprintPure) : (UpdatedFunctionFlags & ~FUNC_BlueprintPure);
+				}
+				if (bHasConst)
+				{
+					UpdatedFunctionFlags = bConst ? (UpdatedFunctionFlags | FUNC_Const) : (UpdatedFunctionFlags & ~FUNC_Const);
+				}
+				if (bHasAccess)
+				{
+					UpdatedFunctionFlags = (UpdatedFunctionFlags & ~FUNC_AccessSpecifiers) | ParsedAccessSpecifier;
+				}
+				SkeletonFunction->FunctionFlags = static_cast<EFunctionFlags>(UpdatedFunctionFlags);
+			}
+		}
+
+		if (bStructuralChange)
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+		else
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetBoolField(TEXT("structural_change"), bStructuralChange);
+		Result->SetObjectField(TEXT("function"), BuildFunctionJson(Blueprint, FunctionGraph));
+		return Result;
+	};
+
+TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleAddFunctionParam(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString FunctionName;
+	FString ParamName;
+	FString ParamType;
+	FString DirectionName = TEXT("input");
+	FString TypeReferencePath;
+	FString ContainerTypeName;
+	FString MapKeyTypeName;
+	FString MapKeyTypeReferencePath;
+	FString DefaultValue;
+	bool bPassByReference = false;
+	bool bConst = false;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("function_name"), FunctionName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'function_name'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("param_name"), ParamName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'param_name'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("param_type"), ParamType))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'param_type'"));
+	}
+
+	Request.Params->TryGetStringField(TEXT("direction"), DirectionName);
+	Request.Params->TryGetStringField(TEXT("type_reference"), TypeReferencePath);
+	const bool bHasContainerTypeOverride = Request.Params->TryGetStringField(TEXT("container_type"), ContainerTypeName);
+	const bool bHasMapKeyType = Request.Params->TryGetStringField(TEXT("map_key_type"), MapKeyTypeName);
+	Request.Params->TryGetStringField(TEXT("map_key_type_reference"), MapKeyTypeReferencePath);
+	const bool bHasDefaultValue = Request.Params->TryGetStringField(TEXT("default_value"), DefaultValue);
+	Request.Params->TryGetBoolField(TEXT("pass_by_reference"), bPassByReference);
+	Request.Params->TryGetBoolField(TEXT("const"), bConst);
+
+	EFunctionParamDirection Direction = EFunctionParamDirection::Input;
+	FString DirectionError;
+	if (!ParseFunctionParamDirection(DirectionName, Direction, DirectionError))
+	{
+		return InvalidParams(Request.Id, DirectionError);
+	}
+
+	EPinContainerType ContainerTypeOverride = EPinContainerType::None;
+	if (bHasContainerTypeOverride)
+	{
+		FString ContainerError;
+		if (!ParsePinContainerType(ContainerTypeName, ContainerTypeOverride, ContainerError))
+		{
+			return InvalidParams(Request.Id, ContainerError);
+		}
+	}
+
+	auto Task = [BlueprintPath, FunctionName, ParamName, ParamType, Direction, TypeReferencePath, bHasContainerTypeOverride, ContainerTypeOverride, bHasMapKeyType, MapKeyTypeName, MapKeyTypeReferencePath, bPassByReference, bConst, bHasDefaultValue, DefaultValue]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedParamName = ParamName.TrimStartAndEnd();
+		if (TrimmedParamName.IsEmpty())
+		{
+			return Fail(TEXT("param_name must be non-empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* FunctionGraph = FindFunctionGraphByName(Blueprint, FunctionName);
+		if (!FunctionGraph)
+		{
+			return Fail(FString::Printf(TEXT("Function not found: %s"), *FunctionName));
+		}
+
+		UK2Node_FunctionEntry* FunctionEntry = Cast<UK2Node_FunctionEntry>(FBlueprintEditorUtils::GetEntryNode(FunctionGraph));
+		if (!FunctionEntry)
+		{
+			return Fail(TEXT("Could not resolve function entry node"));
+		}
+
+		FEdGraphPinType PinType;
+		FString PinTypeError;
+		if (!ResolvePinTypeFromTypeSpec(ParamType, TypeReferencePath, bHasContainerTypeOverride, ContainerTypeOverride, bHasMapKeyType, MapKeyTypeName, MapKeyTypeReferencePath, PinType, PinTypeError))
+		{
+			return Fail(PinTypeError);
+		}
+
+		const FName ParamFName(*TrimmedParamName);
+		TArray<UK2Node_EditablePinBase*> UpdatedNodes;
+		if (Direction == EFunctionParamDirection::Input)
+		{
+			for (const TSharedPtr<FUserPinInfo>& UserPin : FunctionEntry->UserDefinedPins)
+			{
+				if (UserPin.IsValid() && UserPin->PinName == ParamFName)
+				{
+					return Fail(FString::Printf(TEXT("Input parameter already exists: %s"), *TrimmedParamName));
+				}
+			}
+
+			PinType.bIsReference = bPassByReference;
+			PinType.bIsConst = bConst;
+			UEdGraphPin* CreatedPin = FunctionEntry->CreateUserDefinedPin(ParamFName, PinType, EGPD_Output);
+			if (!CreatedPin)
+			{
+				return Fail(FString::Printf(TEXT("Failed to add input parameter: %s"), *TrimmedParamName));
+			}
+
+			if (bHasDefaultValue)
+			{
+				for (const TSharedPtr<FUserPinInfo>& UserPin : FunctionEntry->UserDefinedPins)
+				{
+					if (UserPin.IsValid() && UserPin->PinName == ParamFName)
+					{
+						UserPin->PinDefaultValue = DefaultValue;
+						break;
+					}
+				}
+			}
+
+			UpdatedNodes.Add(FunctionEntry);
+		}
+		else
+		{
+			PinType.bIsReference = false;
+			PinType.bIsConst = bConst;
+
+			UK2Node_FunctionResult* ResultNode = FBlueprintEditorUtils::FindOrCreateFunctionResultNode(FunctionEntry);
+			if (!ResultNode)
+			{
+				return Fail(TEXT("Failed to resolve function result node"));
+			}
+
+			TArray<UK2Node_EditablePinBase*> ResultNodes = GatherAllResultNodes(ResultNode);
+			if (ResultNodes.Num() == 0)
+			{
+				return Fail(TEXT("No function result nodes found"));
+			}
+
+			for (const TSharedPtr<FUserPinInfo>& UserPin : ResultNodes[0]->UserDefinedPins)
+			{
+				if (UserPin.IsValid() && UserPin->PinName == ParamFName)
+				{
+					return Fail(FString::Printf(TEXT("Output parameter already exists: %s"), *TrimmedParamName));
+				}
+			}
+
+			for (UK2Node_EditablePinBase* Node : ResultNodes)
+			{
+				UEdGraphPin* CreatedPin = Node ? Node->CreateUserDefinedPin(ParamFName, PinType, EGPD_Input, false) : nullptr;
+				if (!CreatedPin)
+				{
+					return Fail(FString::Printf(TEXT("Failed to add output parameter: %s"), *TrimmedParamName));
+				}
+				UpdatedNodes.Add(Node);
+
+				if (bHasDefaultValue)
+				{
+					for (const TSharedPtr<FUserPinInfo>& UserPin : Node->UserDefinedPins)
+					{
+						if (UserPin.IsValid() && UserPin->PinName == ParamFName)
+						{
+							UserPin->PinDefaultValue = DefaultValue;
+							break;
+						}
+					}
+				}
+			}
+		}
+
+		for (UK2Node_EditablePinBase* Node : UpdatedNodes)
+		{
+			RefreshEditablePinNode(Node);
+		}
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("function_name"), FunctionGraph->GetName());
+		Result->SetStringField(TEXT("param_name"), ParamFName.ToString());
+		Result->SetStringField(TEXT("direction"), FunctionParamDirectionToString(Direction));
+		Result->SetObjectField(TEXT("function"), BuildFunctionJson(Blueprint, FunctionGraph));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleRemoveFunctionParam(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString FunctionName;
+	FString ParamName;
+	FString DirectionName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("function_name"), FunctionName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'function_name'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("param_name"), ParamName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'param_name'"));
+	}
+
+	const bool bHasDirection = Request.Params->TryGetStringField(TEXT("direction"), DirectionName);
+	EFunctionParamDirection Direction = EFunctionParamDirection::Input;
+	if (bHasDirection)
+	{
+		FString DirectionError;
+		if (!ParseFunctionParamDirection(DirectionName, Direction, DirectionError))
+		{
+			return InvalidParams(Request.Id, DirectionError);
+		}
+	}
+
+	auto Task = [BlueprintPath, FunctionName, ParamName, bHasDirection, Direction]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedParamName = ParamName.TrimStartAndEnd();
+		if (TrimmedParamName.IsEmpty())
+		{
+			return Fail(TEXT("param_name must be non-empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* FunctionGraph = FindFunctionGraphByName(Blueprint, FunctionName);
+		if (!FunctionGraph)
+		{
+			return Fail(FString::Printf(TEXT("Function not found: %s"), *FunctionName));
+		}
+
+		UK2Node_FunctionEntry* FunctionEntry = Cast<UK2Node_FunctionEntry>(FBlueprintEditorUtils::GetEntryNode(FunctionGraph));
+		if (!FunctionEntry)
+		{
+			return Fail(TEXT("Could not resolve function entry node"));
+		}
+
+		const FName ParamFName(*TrimmedParamName);
+		bool bRemovedInput = false;
+		bool bRemovedOutput = false;
+		TArray<UK2Node_EditablePinBase*> UpdatedNodes;
+
+		const bool bAllowInput = !bHasDirection || Direction == EFunctionParamDirection::Input;
+		const bool bAllowOutput = !bHasDirection || Direction == EFunctionParamDirection::Output;
+
+		if (bAllowInput)
+		{
+			for (const TSharedPtr<FUserPinInfo>& UserPin : FunctionEntry->UserDefinedPins)
+			{
+				if (UserPin.IsValid() && UserPin->PinName == ParamFName)
+				{
+					FunctionEntry->Modify();
+					FunctionEntry->RemoveUserDefinedPinByName(ParamFName);
+					bRemovedInput = true;
+					UpdatedNodes.AddUnique(FunctionEntry);
+					break;
+				}
+			}
+		}
+
+		if (bAllowOutput)
+		{
+			TArray<UK2Node_FunctionResult*> FunctionResultNodes;
+			FunctionGraph->GetNodesOfClass(FunctionResultNodes);
+			if (FunctionResultNodes.Num() > 0)
+			{
+				TArray<UK2Node_EditablePinBase*> ResultNodes = GatherAllResultNodes(FunctionResultNodes[0]);
+				for (UK2Node_EditablePinBase* Node : ResultNodes)
+				{
+					bool bNodeHadPin = false;
+					for (const TSharedPtr<FUserPinInfo>& UserPin : Node->UserDefinedPins)
+					{
+						if (UserPin.IsValid() && UserPin->PinName == ParamFName)
+						{
+							bNodeHadPin = true;
+							break;
+						}
+					}
+
+					if (bNodeHadPin)
+					{
+						Node->Modify();
+						Node->RemoveUserDefinedPinByName(ParamFName);
+						bRemovedOutput = true;
+						UpdatedNodes.AddUnique(Node);
+					}
+				}
+			}
+		}
+
+		if (!bRemovedInput && !bRemovedOutput)
+		{
+			return Fail(FString::Printf(TEXT("Parameter not found: %s"), *TrimmedParamName));
+		}
+
+		for (UK2Node_EditablePinBase* Node : UpdatedNodes)
+		{
+			RefreshEditablePinNode(Node);
+		}
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		FString RemovedDirection = TEXT("input");
+		if (bRemovedInput && bRemovedOutput)
+		{
+			RemovedDirection = TEXT("both");
+		}
+		else if (bRemovedOutput)
+		{
+			RemovedDirection = TEXT("output");
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("function_name"), FunctionGraph->GetName());
+		Result->SetStringField(TEXT("param_name"), ParamFName.ToString());
+		Result->SetStringField(TEXT("removed_direction"), RemovedDirection);
+		Result->SetObjectField(TEXT("function"), BuildFunctionJson(Blueprint, FunctionGraph));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleSetFunctionReturn(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString FunctionName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("function_name"), FunctionName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'function_name'"));
+	}
+
+	bool bClear = false;
+	FString ReturnName = UEdGraphSchema_K2::PN_ReturnValue.ToString();
+	FString ReturnType;
+	FString TypeReferencePath;
+	FString ContainerTypeName;
+	FString MapKeyTypeName;
+	FString MapKeyTypeReferencePath;
+	FString DefaultValue;
+
+	Request.Params->TryGetBoolField(TEXT("clear"), bClear);
+	Request.Params->TryGetStringField(TEXT("return_name"), ReturnName);
+	const bool bHasReturnType = Request.Params->TryGetStringField(TEXT("return_type"), ReturnType);
+	Request.Params->TryGetStringField(TEXT("type_reference"), TypeReferencePath);
+	const bool bHasContainerTypeOverride = Request.Params->TryGetStringField(TEXT("container_type"), ContainerTypeName);
+	const bool bHasMapKeyType = Request.Params->TryGetStringField(TEXT("map_key_type"), MapKeyTypeName);
+	Request.Params->TryGetStringField(TEXT("map_key_type_reference"), MapKeyTypeReferencePath);
+	const bool bHasDefaultValue = Request.Params->TryGetStringField(TEXT("default_value"), DefaultValue);
+
+	if (!bClear && !bHasReturnType)
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'return_type' when clear=false"));
+	}
+
+	EPinContainerType ContainerTypeOverride = EPinContainerType::None;
+	if (bHasContainerTypeOverride)
+	{
+		FString ContainerError;
+		if (!ParsePinContainerType(ContainerTypeName, ContainerTypeOverride, ContainerError))
+		{
+			return InvalidParams(Request.Id, ContainerError);
+		}
+	}
+
+	auto Task = [BlueprintPath, FunctionName, bClear, ReturnName, ReturnType, TypeReferencePath, bHasContainerTypeOverride, ContainerTypeOverride, bHasMapKeyType, MapKeyTypeName, MapKeyTypeReferencePath, bHasDefaultValue, DefaultValue]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		FString TrimmedReturnName = ReturnName.TrimStartAndEnd();
+		if (TrimmedReturnName.IsEmpty())
+		{
+			TrimmedReturnName = UEdGraphSchema_K2::PN_ReturnValue.ToString();
+		}
+		const FName ReturnFName(*TrimmedReturnName);
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* FunctionGraph = FindFunctionGraphByName(Blueprint, FunctionName);
+		if (!FunctionGraph)
+		{
+			return Fail(FString::Printf(TEXT("Function not found: %s"), *FunctionName));
+		}
+
+		UK2Node_FunctionEntry* FunctionEntry = Cast<UK2Node_FunctionEntry>(FBlueprintEditorUtils::GetEntryNode(FunctionGraph));
+		if (!FunctionEntry)
+		{
+			return Fail(TEXT("Could not resolve function entry node"));
+		}
+
+		TArray<UK2Node_FunctionResult*> ExistingResultNodes;
+		FunctionGraph->GetNodesOfClass(ExistingResultNodes);
+
+		UK2Node_FunctionResult* ResultNode = ExistingResultNodes.Num() > 0 ? ExistingResultNodes[0] : nullptr;
+		if (!ResultNode && !bClear)
+		{
+			ResultNode = FBlueprintEditorUtils::FindOrCreateFunctionResultNode(FunctionEntry);
+		}
+		if (!ResultNode)
+		{
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetStringField(TEXT("function_name"), FunctionGraph->GetName());
+			Result->SetStringField(TEXT("return_name"), TrimmedReturnName);
+			Result->SetBoolField(TEXT("changed"), false);
+			Result->SetObjectField(TEXT("function"), BuildFunctionJson(Blueprint, FunctionGraph));
+			return Result;
+		}
+
+		TArray<UK2Node_EditablePinBase*> ResultNodes = GatherAllResultNodes(ResultNode);
+		if (ResultNodes.Num() == 0)
+		{
+			return Fail(TEXT("No function result nodes found"));
+		}
+
+		bool bRemovedExisting = false;
+		for (UK2Node_EditablePinBase* Node : ResultNodes)
+		{
+			bool bHasPin = false;
+			for (const TSharedPtr<FUserPinInfo>& UserPin : Node->UserDefinedPins)
+			{
+				if (UserPin.IsValid() && UserPin->PinName == ReturnFName)
+				{
+					bHasPin = true;
+					break;
+				}
+			}
+			if (bHasPin)
+			{
+				Node->Modify();
+				Node->RemoveUserDefinedPinByName(ReturnFName);
+				bRemovedExisting = true;
+			}
+		}
+
+		bool bCreatedReturn = false;
+		if (!bClear)
+		{
+			FEdGraphPinType ReturnPinType;
+			FString PinTypeError;
+			if (!ResolvePinTypeFromTypeSpec(ReturnType, TypeReferencePath, bHasContainerTypeOverride, ContainerTypeOverride, bHasMapKeyType, MapKeyTypeName, MapKeyTypeReferencePath, ReturnPinType, PinTypeError))
+			{
+				return Fail(PinTypeError);
+			}
+			ReturnPinType.bIsReference = false;
+			ReturnPinType.bIsConst = false;
+
+			for (UK2Node_EditablePinBase* Node : ResultNodes)
+			{
+				UEdGraphPin* NewPin = Node ? Node->CreateUserDefinedPin(ReturnFName, ReturnPinType, EGPD_Input, false) : nullptr;
+				if (!NewPin)
+				{
+					return Fail(FString::Printf(TEXT("Failed to create return pin '%s'"), *TrimmedReturnName));
+				}
+				bCreatedReturn = true;
+
+				if (bHasDefaultValue)
+				{
+					for (const TSharedPtr<FUserPinInfo>& UserPin : Node->UserDefinedPins)
+					{
+						if (UserPin.IsValid() && UserPin->PinName == ReturnFName)
+						{
+							UserPin->PinDefaultValue = DefaultValue;
+							break;
+						}
+					}
+				}
+			}
+		}
+
+		if (!bRemovedExisting && !bCreatedReturn && bClear)
+		{
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetStringField(TEXT("function_name"), FunctionGraph->GetName());
+			Result->SetStringField(TEXT("return_name"), TrimmedReturnName);
+			Result->SetBoolField(TEXT("changed"), false);
+			Result->SetObjectField(TEXT("function"), BuildFunctionJson(Blueprint, FunctionGraph));
+			return Result;
+		}
+
+		for (UK2Node_EditablePinBase* Node : ResultNodes)
+		{
+			RefreshEditablePinNode(Node);
+		}
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("function_name"), FunctionGraph->GetName());
+		Result->SetStringField(TEXT("return_name"), TrimmedReturnName);
+		Result->SetBoolField(TEXT("changed"), true);
+		Result->SetBoolField(TEXT("created"), bCreatedReturn);
+		Result->SetObjectField(TEXT("function"), BuildFunctionJson(Blueprint, FunctionGraph));
+		return Result;
+	};
+
+TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleListMacros(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+
+	auto Task = [BlueprintPath]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		TArray<UEdGraph*> MacroGraphs;
+		for (UEdGraph* Graph : Blueprint->MacroGraphs)
+		{
+			if (Graph)
+			{
+				MacroGraphs.Add(Graph);
+			}
+		}
+		MacroGraphs.Sort([](const UEdGraph& A, const UEdGraph& B)
+		{
+			return A.GetName().Compare(B.GetName(), ESearchCase::IgnoreCase) < 0;
+		});
+
+		TArray<TSharedPtr<FJsonValue>> MacrosJson;
+		for (UEdGraph* Graph : MacroGraphs)
+		{
+			TSharedPtr<FJsonObject> MacroObj = BuildGraphJson(Blueprint, Graph);
+			MacroObj->SetStringField(TEXT("macro_name"), Graph->GetName());
+			MacrosJson.Add(MakeShared<FJsonValueObject>(MacroObj));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetArrayField(TEXT("macros"), MacrosJson);
+		Result->SetNumberField(TEXT("count"), MacrosJson.Num());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleCreateMacro(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString MacroName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("macro_name"), MacroName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'macro_name'"));
+	}
+
+	auto Task = [BlueprintPath, MacroName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedMacroName = MacroName.TrimStartAndEnd();
+		if (TrimmedMacroName.IsEmpty())
+		{
+			return Fail(TEXT("macro_name must be non-empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		if (ResolveGraph(Blueprint, TrimmedMacroName))
+		{
+			return Fail(FString::Printf(TEXT("A graph already exists with name: %s"), *TrimmedMacroName));
+		}
+
+		UEdGraph* NewGraph = FBlueprintEditorUtils::CreateNewGraph(
+			Blueprint,
+			FName(*TrimmedMacroName),
+			UEdGraph::StaticClass(),
+			UEdGraphSchema_K2::StaticClass()
+		);
+		if (!NewGraph)
+		{
+			return Fail(FString::Printf(TEXT("Failed to create macro: %s"), *TrimmedMacroName));
+		}
+
+		FBlueprintEditorUtils::AddMacroGraph(Blueprint, NewGraph, true, nullptr);
+
+		TSharedPtr<FJsonObject> MacroObj = BuildGraphJson(Blueprint, NewGraph);
+		MacroObj->SetStringField(TEXT("macro_name"), NewGraph->GetName());
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetObjectField(TEXT("macro"), MacroObj);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleDeleteMacro(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString MacroName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("macro_name"), MacroName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'macro_name'"));
+	}
+
+	auto Task = [BlueprintPath, MacroName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedMacroName = MacroName.TrimStartAndEnd();
+		if (TrimmedMacroName.IsEmpty())
+		{
+			return Fail(TEXT("macro_name must be non-empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* MacroGraph = FindMacroGraphByName(Blueprint, TrimmedMacroName);
+		if (!MacroGraph)
+		{
+			return Fail(FString::Printf(TEXT("Macro not found: %s"), *TrimmedMacroName));
+		}
+
+		const FString RemovedMacroName = MacroGraph->GetName();
+		FBlueprintEditorUtils::RemoveGraph(Blueprint, MacroGraph, EGraphRemoveFlags::Default);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("removed_macro_name"), RemovedMacroName);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleListEventDispatchers(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+
+	auto Task = [BlueprintPath]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		TArray<int32> DispatcherIndexes;
+		for (int32 Index = 0; Index < Blueprint->NewVariables.Num(); ++Index)
+		{
+			if (Blueprint->NewVariables[Index].VarType.PinCategory == UEdGraphSchema_K2::PC_MCDelegate)
+			{
+				DispatcherIndexes.Add(Index);
+			}
+		}
+		DispatcherIndexes.Sort([Blueprint](const int32 A, const int32 B)
+		{
+			return Blueprint->NewVariables[A].VarName.ToString().Compare(Blueprint->NewVariables[B].VarName.ToString(), ESearchCase::IgnoreCase) < 0;
+		});
+
+		TArray<TSharedPtr<FJsonValue>> DispatchersJson;
+		for (const int32 DispatcherIndex : DispatcherIndexes)
+		{
+			DispatchersJson.Add(MakeShared<FJsonValueObject>(BuildDispatcherJson(Blueprint, Blueprint->NewVariables[DispatcherIndex])));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetArrayField(TEXT("event_dispatchers"), DispatchersJson);
+		Result->SetNumberField(TEXT("count"), DispatchersJson.Num());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleCreateEventDispatcher(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString DispatcherName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("dispatcher_name"), DispatcherName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'dispatcher_name'"));
+	}
+
+	auto Task = [BlueprintPath, DispatcherName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedDispatcherName = DispatcherName.TrimStartAndEnd();
+		if (TrimmedDispatcherName.IsEmpty())
+		{
+			return Fail(TEXT("dispatcher_name must be non-empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		const FName DispatcherFName(*TrimmedDispatcherName);
+		if (FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, DispatcherFName) != INDEX_NONE)
+		{
+			return Fail(FString::Printf(TEXT("A variable already exists with name: %s"), *TrimmedDispatcherName));
+		}
+		if (ResolveGraph(Blueprint, TrimmedDispatcherName))
+		{
+			return Fail(FString::Printf(TEXT("A graph already exists with name: %s"), *TrimmedDispatcherName));
+		}
+
+		FEdGraphPinType DelegatePinType;
+		DelegatePinType.PinCategory = UEdGraphSchema_K2::PC_MCDelegate;
+		const bool bCreatedVariable = FBlueprintEditorUtils::AddMemberVariable(Blueprint, DispatcherFName, DelegatePinType);
+		if (!bCreatedVariable)
+		{
+			return Fail(FString::Printf(TEXT("Failed to add dispatcher variable: %s"), *TrimmedDispatcherName));
+		}
+
+		const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+		if (!K2Schema)
+		{
+			FBlueprintEditorUtils::RemoveMemberVariable(Blueprint, DispatcherFName);
+			return Fail(TEXT("K2 schema unavailable"));
+		}
+
+		UEdGraph* NewGraph = FBlueprintEditorUtils::CreateNewGraph(
+			Blueprint,
+			DispatcherFName,
+			UEdGraph::StaticClass(),
+			UEdGraphSchema_K2::StaticClass()
+		);
+		if (!NewGraph)
+		{
+			FBlueprintEditorUtils::RemoveMemberVariable(Blueprint, DispatcherFName);
+			return Fail(FString::Printf(TEXT("Failed to create signature graph for dispatcher: %s"), *TrimmedDispatcherName));
+		}
+
+		NewGraph->bEditable = false;
+		K2Schema->CreateDefaultNodesForGraph(*NewGraph);
+		K2Schema->CreateFunctionGraphTerminators(*NewGraph, static_cast<UClass*>(nullptr));
+		K2Schema->AddExtraFunctionFlags(NewGraph, (FUNC_BlueprintCallable | FUNC_BlueprintEvent | FUNC_Public));
+		K2Schema->MarkFunctionEntryAsEditable(NewGraph, true);
+		Blueprint->DelegateSignatureGraphs.Add(NewGraph);
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		const int32 DispatcherIndex = FindDispatcherVariableIndex(Blueprint, DispatcherFName);
+		if (DispatcherIndex == INDEX_NONE)
+		{
+			return Fail(TEXT("Dispatcher variable was created but could not be resolved"));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetObjectField(TEXT("event_dispatcher"), BuildDispatcherJson(Blueprint, Blueprint->NewVariables[DispatcherIndex]));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleSetDispatcherSignature(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString DispatcherName;
+	const TArray<TSharedPtr<FJsonValue>>* ParametersJson = nullptr;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("dispatcher_name"), DispatcherName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'dispatcher_name'"));
+	}
+	if (!Request.Params->TryGetArrayField(TEXT("parameters"), ParametersJson))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameters'"));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ParameterList = ParametersJson ? *ParametersJson : TArray<TSharedPtr<FJsonValue>>();
+	auto Task = [BlueprintPath, DispatcherName, ParameterList]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		const FName DispatcherFName(*DispatcherName.TrimStartAndEnd());
+		const int32 DispatcherIndex = FindDispatcherVariableIndex(Blueprint, DispatcherFName);
+		if (DispatcherIndex == INDEX_NONE)
+		{
+			return Fail(FString::Printf(TEXT("Event dispatcher not found: %s"), *DispatcherName));
+		}
+
+		UEdGraph* SignatureGraph = FBlueprintEditorUtils::GetDelegateSignatureGraphByName(Blueprint, DispatcherFName);
+		if (!SignatureGraph)
+		{
+			return Fail(FString::Printf(TEXT("Dispatcher signature graph not found: %s"), *DispatcherName));
+		}
+
+		UK2Node_FunctionEntry* EntryNode = Cast<UK2Node_FunctionEntry>(FBlueprintEditorUtils::GetEntryNode(SignatureGraph));
+		if (!EntryNode)
+		{
+			return Fail(TEXT("Could not resolve dispatcher entry node"));
+		}
+
+		struct FRequestedSignatureParam
+		{
+			FName ParamName;
+			FEdGraphPinType ParamType;
+			bool bHasDefaultValue = false;
+			FString DefaultValue;
+		};
+
+		TArray<FRequestedSignatureParam> RequestedParams;
+		RequestedParams.Reserve(ParameterList.Num());
+		TSet<FName> SeenParamNames;
+
+		for (int32 ParamIndex = 0; ParamIndex < ParameterList.Num(); ++ParamIndex)
+		{
+			const TSharedPtr<FJsonValue>& ParamValue = ParameterList[ParamIndex];
+			const TSharedPtr<FJsonObject> ParamObj = ParamValue.IsValid() ? ParamValue->AsObject() : nullptr;
+			if (!ParamObj.IsValid())
+			{
+				return Fail(FString::Printf(TEXT("parameters[%d] must be an object"), ParamIndex));
+			}
+
+			FString ParamName;
+			FString ParamTypeName;
+			if (!ParamObj->TryGetStringField(TEXT("param_name"), ParamName))
+			{
+				return Fail(FString::Printf(TEXT("parameters[%d] is missing 'param_name'"), ParamIndex));
+			}
+			if (!ParamObj->TryGetStringField(TEXT("param_type"), ParamTypeName))
+			{
+				return Fail(FString::Printf(TEXT("parameters[%d] is missing 'param_type'"), ParamIndex));
+			}
+
+			const FString TrimmedParamName = ParamName.TrimStartAndEnd();
+			if (TrimmedParamName.IsEmpty())
+			{
+				return Fail(FString::Printf(TEXT("parameters[%d].param_name must be non-empty"), ParamIndex));
+			}
+
+			const FName ParamFName(*TrimmedParamName);
+			if (SeenParamNames.Contains(ParamFName))
+			{
+				return Fail(FString::Printf(TEXT("Duplicate parameter name: %s"), *TrimmedParamName));
+			}
+			SeenParamNames.Add(ParamFName);
+
+			FString TypeReferencePath;
+			ParamObj->TryGetStringField(TEXT("type_reference"), TypeReferencePath);
+
+			FString ContainerTypeName;
+			EPinContainerType ContainerTypeOverride = EPinContainerType::None;
+			const bool bHasContainerTypeOverride = ParamObj->TryGetStringField(TEXT("container_type"), ContainerTypeName);
+			if (bHasContainerTypeOverride)
+			{
+				FString ContainerError;
+				if (!ParsePinContainerType(ContainerTypeName, ContainerTypeOverride, ContainerError))
+				{
+					return Fail(FString::Printf(TEXT("parameters[%d]: %s"), ParamIndex, *ContainerError));
+				}
+			}
+
+			FString MapKeyTypeName;
+			const bool bHasMapKeyType = ParamObj->TryGetStringField(TEXT("map_key_type"), MapKeyTypeName);
+			FString MapKeyTypeReferencePath;
+			ParamObj->TryGetStringField(TEXT("map_key_type_reference"), MapKeyTypeReferencePath);
+
+			FEdGraphPinType PinType;
+			FString PinTypeError;
+			if (!ResolvePinTypeFromTypeSpec(ParamTypeName, TypeReferencePath, bHasContainerTypeOverride, ContainerTypeOverride, bHasMapKeyType, MapKeyTypeName, MapKeyTypeReferencePath, PinType, PinTypeError))
+			{
+				return Fail(FString::Printf(TEXT("parameters[%d]: %s"), ParamIndex, *PinTypeError));
+			}
+
+			bool bPassByReference = false;
+			if (ParamObj->TryGetBoolField(TEXT("pass_by_reference"), bPassByReference))
+			{
+				PinType.bIsReference = bPassByReference;
+			}
+
+			bool bConst = false;
+			if (ParamObj->TryGetBoolField(TEXT("const"), bConst))
+			{
+				PinType.bIsConst = bConst;
+			}
+
+			FRequestedSignatureParam& Requested = RequestedParams.AddDefaulted_GetRef();
+			Requested.ParamName = ParamFName;
+			Requested.ParamType = PinType;
+			Requested.bHasDefaultValue = ParamObj->TryGetStringField(TEXT("default_value"), Requested.DefaultValue);
+		}
+
+		TArray<FName> ExistingParamNames;
+		for (const TSharedPtr<FUserPinInfo>& UserPin : EntryNode->UserDefinedPins)
+		{
+			if (UserPin.IsValid())
+			{
+				ExistingParamNames.Add(UserPin->PinName);
+			}
+		}
+		for (const FName ExistingParamName : ExistingParamNames)
+		{
+			EntryNode->RemoveUserDefinedPinByName(ExistingParamName);
+		}
+
+		for (const FRequestedSignatureParam& RequestedParam : RequestedParams)
+		{
+			UEdGraphPin* NewPin = EntryNode->CreateUserDefinedPin(RequestedParam.ParamName, RequestedParam.ParamType, EGPD_Output, false);
+			if (!NewPin)
+			{
+				return Fail(FString::Printf(TEXT("Failed to add dispatcher parameter: %s"), *RequestedParam.ParamName.ToString()));
+			}
+
+			if (RequestedParam.bHasDefaultValue)
+			{
+				for (const TSharedPtr<FUserPinInfo>& UserPin : EntryNode->UserDefinedPins)
+				{
+					if (UserPin.IsValid() && UserPin->PinName == RequestedParam.ParamName)
+					{
+						UserPin->PinDefaultValue = RequestedParam.DefaultValue;
+						break;
+					}
+				}
+			}
+		}
+
+		RefreshEditablePinNode(EntryNode);
+		FBlueprintEditorUtils::ConformDelegateSignatureGraphs(Blueprint);
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetObjectField(TEXT("event_dispatcher"), BuildDispatcherJson(Blueprint, Blueprint->NewVariables[DispatcherIndex]));
+		Result->SetNumberField(TEXT("signature_param_count"), RequestedParams.Num());
 		return Result;
 	};
 

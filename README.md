@@ -97,6 +97,20 @@ Native Blueprint graph tools for node-based authoring workflows:
 - `blueprint/set_component_property`
 - `blueprint/get_component_property`
 - `blueprint/set_component_transform_default`
+- `blueprint/list_functions`
+- `blueprint/create_function`
+- `blueprint/delete_function`
+- `blueprint/rename_function`
+- `blueprint/set_function_flags`
+- `blueprint/add_function_param`
+- `blueprint/remove_function_param`
+- `blueprint/set_function_return`
+- `blueprint/list_macros`
+- `blueprint/create_macro`
+- `blueprint/delete_macro`
+- `blueprint/list_event_dispatchers`
+- `blueprint/create_event_dispatcher`
+- `blueprint/set_dispatcher_signature`
 
 ### Visual Feedback Loop
 
@@ -182,7 +196,7 @@ Your AI assistant now has access to:
 | Service | Methods | Description |
 |---------|:-------:|-------------|
 | **Python** | 3 | Execute scripts, run files, list modules |
-| **Blueprint** | 43 | Blueprint asset lifecycle, graph management, variable authoring, component SCS authoring, node authoring, and compile support |
+| **Blueprint** | 57 | Blueprint asset lifecycle, graph management, variable authoring, component SCS authoring, function/macro/dispatcher authoring, node authoring, and compile support |
 | **Screenshot** | 2 | Capture viewport for AI vision |
 | **World** | 30+ | Actor manipulation and spatial queries |
 | **Assets** | 4 | Content Browser search and inspection |
