@@ -22,7 +22,11 @@
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/EngineTypes.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
 #include "GameFramework/Actor.h"
+#include "Components/ActorComponent.h"
+#include "Components/SceneComponent.h"
 #include "UObject/CoreNetTypes.h"
 #include "UObject/UObjectIterator.h"
 #include "Misc/PackageName.h"
@@ -1170,6 +1174,185 @@ namespace
 		VariableObj->SetStringField(TEXT("replication_condition"), ReplicationConditionToString(Variable.ReplicationCondition));
 		return VariableObj;
 	}
+
+	static TArray<TSharedPtr<FJsonValue>> BuildVectorJsonArray(const FVector& VectorValue)
+	{
+		TArray<TSharedPtr<FJsonValue>> Array;
+		Array.Reserve(3);
+		Array.Add(MakeShared<FJsonValueNumber>(VectorValue.X));
+		Array.Add(MakeShared<FJsonValueNumber>(VectorValue.Y));
+		Array.Add(MakeShared<FJsonValueNumber>(VectorValue.Z));
+		return Array;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> BuildRotatorJsonArray(const FRotator& RotatorValue)
+	{
+		TArray<TSharedPtr<FJsonValue>> Array;
+		Array.Reserve(3);
+		Array.Add(MakeShared<FJsonValueNumber>(RotatorValue.Pitch));
+		Array.Add(MakeShared<FJsonValueNumber>(RotatorValue.Yaw));
+		Array.Add(MakeShared<FJsonValueNumber>(RotatorValue.Roll));
+		return Array;
+	}
+
+	static bool ParseVectorParam(const TSharedPtr<FJsonObject>& Params, const TCHAR* FieldName, FVector& OutVector, FString& OutError, bool& bOutWasProvided)
+	{
+		bOutWasProvided = false;
+		if (!Params.IsValid())
+		{
+			OutError = TEXT("Missing params object");
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* ValueArray = nullptr;
+		if (!Params->TryGetArrayField(FieldName, ValueArray))
+		{
+			return true;
+		}
+
+		bOutWasProvided = true;
+		if (!ValueArray || ValueArray->Num() != 3)
+		{
+			OutError = FString::Printf(TEXT("Parameter '%s' must be an array [X, Y, Z]"), FieldName);
+			return false;
+		}
+
+		double X = 0.0;
+		double Y = 0.0;
+		double Z = 0.0;
+		if (!(*ValueArray)[0]->TryGetNumber(X) || !(*ValueArray)[1]->TryGetNumber(Y) || !(*ValueArray)[2]->TryGetNumber(Z))
+		{
+			OutError = FString::Printf(TEXT("Parameter '%s' must contain numeric values"), FieldName);
+			return false;
+		}
+
+		OutVector = FVector(static_cast<float>(X), static_cast<float>(Y), static_cast<float>(Z));
+		return true;
+	}
+
+	static bool ParseRotatorParam(const TSharedPtr<FJsonObject>& Params, const TCHAR* FieldName, FRotator& OutRotator, FString& OutError, bool& bOutWasProvided)
+	{
+		bOutWasProvided = false;
+		if (!Params.IsValid())
+		{
+			OutError = TEXT("Missing params object");
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* ValueArray = nullptr;
+		if (!Params->TryGetArrayField(FieldName, ValueArray))
+		{
+			return true;
+		}
+
+		bOutWasProvided = true;
+		if (!ValueArray || ValueArray->Num() != 3)
+		{
+			OutError = FString::Printf(TEXT("Parameter '%s' must be an array [Pitch, Yaw, Roll]"), FieldName);
+			return false;
+		}
+
+		double Pitch = 0.0;
+		double Yaw = 0.0;
+		double Roll = 0.0;
+		if (!(*ValueArray)[0]->TryGetNumber(Pitch) || !(*ValueArray)[1]->TryGetNumber(Yaw) || !(*ValueArray)[2]->TryGetNumber(Roll))
+		{
+			OutError = FString::Printf(TEXT("Parameter '%s' must contain numeric values"), FieldName);
+			return false;
+		}
+
+		OutRotator = FRotator(static_cast<float>(Pitch), static_cast<float>(Yaw), static_cast<float>(Roll));
+		return true;
+	}
+
+	static FProperty* FindPropertyByNameCaseInsensitive(UClass* OwnerClass, const FString& PropertyName)
+	{
+		if (!OwnerClass || PropertyName.IsEmpty())
+		{
+			return nullptr;
+		}
+
+		const FName PropertyFName(*PropertyName);
+		if (FProperty* ExactMatch = OwnerClass->FindPropertyByName(PropertyFName))
+		{
+			return ExactMatch;
+		}
+
+		for (TFieldIterator<FProperty> It(OwnerClass, EFieldIterationFlags::IncludeSuper); It; ++It)
+		{
+			FProperty* Property = *It;
+			if (Property && Property->GetName().Equals(PropertyName, ESearchCase::IgnoreCase))
+			{
+				return Property;
+			}
+		}
+
+		return nullptr;
+	}
+
+	static TSharedPtr<FJsonObject> BuildComponentJson(UBlueprint* Blueprint, USimpleConstructionScript* SCS, USCS_Node* Node)
+	{
+		TSharedPtr<FJsonObject> ComponentObj = MakeShared<FJsonObject>();
+		if (!Node)
+		{
+			ComponentObj->SetStringField(TEXT("component_name"), TEXT("None"));
+			return ComponentObj;
+		}
+
+		ComponentObj->SetStringField(TEXT("component_name"), Node->GetVariableName().ToString());
+		ComponentObj->SetStringField(TEXT("guid"), Node->VariableGuid.ToString(EGuidFormats::DigitsWithHyphens));
+		ComponentObj->SetStringField(TEXT("attach_socket"), Node->AttachToName.IsNone() ? TEXT("") : Node->AttachToName.ToString());
+		ComponentObj->SetBoolField(TEXT("is_root"), Node->IsRootNode());
+		ComponentObj->SetStringField(TEXT("parent_component_name"), Node->ParentComponentOrVariableName.IsNone() ? TEXT("") : Node->ParentComponentOrVariableName.ToString());
+
+		UClass* ComponentClass = Node->ComponentClass;
+		if (!ComponentClass && Node->ComponentTemplate)
+		{
+			ComponentClass = Node->ComponentTemplate->GetClass();
+		}
+		ComponentObj->SetStringField(TEXT("component_class"), ComponentClass ? ComponentClass->GetPathName() : TEXT(""));
+
+		if (Node->ComponentTemplate)
+		{
+			ComponentObj->SetStringField(TEXT("template_name"), Node->ComponentTemplate->GetName());
+			ComponentObj->SetStringField(TEXT("template_path"), Node->ComponentTemplate->GetPathName());
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ChildrenJson;
+		for (USCS_Node* ChildNode : Node->GetChildNodes())
+		{
+			if (!ChildNode)
+			{
+				continue;
+			}
+			ChildrenJson.Add(MakeShared<FJsonValueString>(ChildNode->GetVariableName().ToString()));
+		}
+		ComponentObj->SetArrayField(TEXT("children"), ChildrenJson);
+		ComponentObj->SetNumberField(TEXT("child_count"), ChildrenJson.Num());
+
+		if (USceneComponent* SceneTemplate = Cast<USceneComponent>(Node->ComponentTemplate))
+		{
+			ComponentObj->SetBoolField(TEXT("is_scene_component"), true);
+			ComponentObj->SetArrayField(TEXT("relative_location"), BuildVectorJsonArray(SceneTemplate->GetRelativeLocation()));
+			ComponentObj->SetArrayField(TEXT("relative_rotation"), BuildRotatorJsonArray(SceneTemplate->GetRelativeRotation()));
+			ComponentObj->SetArrayField(TEXT("relative_scale"), BuildVectorJsonArray(SceneTemplate->GetRelativeScale3D()));
+		}
+		else
+		{
+			ComponentObj->SetBoolField(TEXT("is_scene_component"), false);
+		}
+
+		if (Blueprint && SCS)
+		{
+			USCS_Node* ParentNode = SCS->FindParentNode(Node);
+			if (ParentNode)
+			{
+				ComponentObj->SetStringField(TEXT("parent_component_name"), ParentNode->GetVariableName().ToString());
+			}
+		}
+
+		return ComponentObj;
+	}
 }
 
 FBlueprintService::FBlueprintService()
@@ -1847,6 +2030,265 @@ TArray<FMCPToolInfo> FBlueprintService::GetAvailableTools() const
 
 	{
 		FMCPToolInfo Tool;
+		Tool.Name = TEXT("list_components");
+		Tool.Description = TEXT("List Blueprint SCS components and hierarchy details.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("add_component");
+		Tool.Description = TEXT("Add a component template to a Blueprint SCS.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> ClassParam = MakeShared<FJsonObject>();
+		ClassParam->SetStringField(TEXT("type"), TEXT("string"));
+		ClassParam->SetStringField(TEXT("description"), TEXT("Component class path or class name."));
+		Tool.Parameters->SetObjectField(TEXT("component_class"), ClassParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Optional component variable name."));
+		Tool.Parameters->SetObjectField(TEXT("component_name"), NameParam);
+
+		TSharedPtr<FJsonObject> ParentParam = MakeShared<FJsonObject>();
+		ParentParam->SetStringField(TEXT("type"), TEXT("string"));
+		ParentParam->SetStringField(TEXT("description"), TEXT("Optional parent scene component variable name."));
+		Tool.Parameters->SetObjectField(TEXT("parent_component_name"), ParentParam);
+
+		TSharedPtr<FJsonObject> SocketParam = MakeShared<FJsonObject>();
+		SocketParam->SetStringField(TEXT("type"), TEXT("string"));
+		SocketParam->SetStringField(TEXT("description"), TEXT("Optional socket name for scene component attachment."));
+		Tool.Parameters->SetObjectField(TEXT("socket_name"), SocketParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("component_class"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("remove_component");
+		Tool.Description = TEXT("Remove a component from a Blueprint SCS.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Component variable name to remove."));
+		Tool.Parameters->SetObjectField(TEXT("component_name"), NameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("component_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("rename_component");
+		Tool.Description = TEXT("Rename a component variable in a Blueprint SCS.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Existing component variable name."));
+		Tool.Parameters->SetObjectField(TEXT("component_name"), NameParam);
+
+		TSharedPtr<FJsonObject> NewNameParam = MakeShared<FJsonObject>();
+		NewNameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NewNameParam->SetStringField(TEXT("description"), TEXT("New component variable name."));
+		Tool.Parameters->SetObjectField(TEXT("new_component_name"), NewNameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("component_name"));
+		Tool.RequiredParams.Add(TEXT("new_component_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("set_root_component");
+		Tool.Description = TEXT("Set a scene component as the Blueprint root component.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Component variable name to set as root."));
+		Tool.Parameters->SetObjectField(TEXT("component_name"), NameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("component_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("attach_component");
+		Tool.Description = TEXT("Attach a scene component to another scene component.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Child component variable name."));
+		Tool.Parameters->SetObjectField(TEXT("component_name"), NameParam);
+
+		TSharedPtr<FJsonObject> ParentParam = MakeShared<FJsonObject>();
+		ParentParam->SetStringField(TEXT("type"), TEXT("string"));
+		ParentParam->SetStringField(TEXT("description"), TEXT("Parent component variable name."));
+		Tool.Parameters->SetObjectField(TEXT("parent_component_name"), ParentParam);
+
+		TSharedPtr<FJsonObject> SocketParam = MakeShared<FJsonObject>();
+		SocketParam->SetStringField(TEXT("type"), TEXT("string"));
+		SocketParam->SetStringField(TEXT("description"), TEXT("Optional socket name."));
+		Tool.Parameters->SetObjectField(TEXT("socket_name"), SocketParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("component_name"));
+		Tool.RequiredParams.Add(TEXT("parent_component_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("detach_component");
+		Tool.Description = TEXT("Detach a component and promote it to a root-level SCS node.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Component variable name."));
+		Tool.Parameters->SetObjectField(TEXT("component_name"), NameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("component_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("set_component_property");
+		Tool.Description = TEXT("Set a component template property value using Unreal import-text format.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Component variable name."));
+		Tool.Parameters->SetObjectField(TEXT("component_name"), NameParam);
+
+		TSharedPtr<FJsonObject> PropertyParam = MakeShared<FJsonObject>();
+		PropertyParam->SetStringField(TEXT("type"), TEXT("string"));
+		PropertyParam->SetStringField(TEXT("description"), TEXT("Property name on the component template."));
+		Tool.Parameters->SetObjectField(TEXT("property_name"), PropertyParam);
+
+		TSharedPtr<FJsonObject> ValueParam = MakeShared<FJsonObject>();
+		ValueParam->SetStringField(TEXT("type"), TEXT("string"));
+		ValueParam->SetStringField(TEXT("description"), TEXT("Property value string in Unreal text format."));
+		Tool.Parameters->SetObjectField(TEXT("value"), ValueParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("component_name"));
+		Tool.RequiredParams.Add(TEXT("property_name"));
+		Tool.RequiredParams.Add(TEXT("value"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("get_component_property");
+		Tool.Description = TEXT("Get a component template property value as Unreal export-text.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Component variable name."));
+		Tool.Parameters->SetObjectField(TEXT("component_name"), NameParam);
+
+		TSharedPtr<FJsonObject> PropertyParam = MakeShared<FJsonObject>();
+		PropertyParam->SetStringField(TEXT("type"), TEXT("string"));
+		PropertyParam->SetStringField(TEXT("description"), TEXT("Property name on the component template."));
+		Tool.Parameters->SetObjectField(TEXT("property_name"), PropertyParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("component_name"));
+		Tool.RequiredParams.Add(TEXT("property_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("set_component_transform_default");
+		Tool.Description = TEXT("Set default relative transform values on a scene component template.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Scene component variable name."));
+		Tool.Parameters->SetObjectField(TEXT("component_name"), NameParam);
+
+		TSharedPtr<FJsonObject> LocationParam = MakeShared<FJsonObject>();
+		LocationParam->SetStringField(TEXT("type"), TEXT("array"));
+		LocationParam->SetStringField(TEXT("description"), TEXT("Optional location as [X, Y, Z]."));
+		Tool.Parameters->SetObjectField(TEXT("location"), LocationParam);
+
+		TSharedPtr<FJsonObject> RotationParam = MakeShared<FJsonObject>();
+		RotationParam->SetStringField(TEXT("type"), TEXT("array"));
+		RotationParam->SetStringField(TEXT("description"), TEXT("Optional rotation as [Pitch, Yaw, Roll]."));
+		Tool.Parameters->SetObjectField(TEXT("rotation"), RotationParam);
+
+		TSharedPtr<FJsonObject> ScaleParam = MakeShared<FJsonObject>();
+		ScaleParam->SetStringField(TEXT("type"), TEXT("array"));
+		ScaleParam->SetStringField(TEXT("description"), TEXT("Optional scale as [X, Y, Z]."));
+		Tool.Parameters->SetObjectField(TEXT("scale"), ScaleParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("component_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
 		Tool.Name = TEXT("add_event_node");
 		Tool.Description = TEXT("Add an event node to a Blueprint graph (e.g. BeginPlay, Tick).");
 
@@ -2121,6 +2563,16 @@ FMCPResponse FBlueprintService::HandleRequest(const FMCPRequest& Request, const 
 	if (MethodName == TEXT("set_variable_savegame")) return HandleSetVariableSaveGame(Request);
 	if (MethodName == TEXT("set_variable_transient")) return HandleSetVariableTransient(Request);
 	if (MethodName == TEXT("set_variable_replication")) return HandleSetVariableReplication(Request);
+	if (MethodName == TEXT("list_components")) return HandleListComponents(Request);
+	if (MethodName == TEXT("add_component")) return HandleAddComponent(Request);
+	if (MethodName == TEXT("remove_component")) return HandleRemoveComponent(Request);
+	if (MethodName == TEXT("rename_component")) return HandleRenameComponent(Request);
+	if (MethodName == TEXT("set_root_component")) return HandleSetRootComponent(Request);
+	if (MethodName == TEXT("attach_component")) return HandleAttachComponent(Request);
+	if (MethodName == TEXT("detach_component")) return HandleDetachComponent(Request);
+	if (MethodName == TEXT("set_component_property")) return HandleSetComponentProperty(Request);
+	if (MethodName == TEXT("get_component_property")) return HandleGetComponentProperty(Request);
+	if (MethodName == TEXT("set_component_transform_default")) return HandleSetComponentTransformDefault(Request);
 	if (MethodName == TEXT("add_event_node")) return HandleAddEventNode(Request);
 	if (MethodName == TEXT("add_call_function_node")) return HandleAddCallFunctionNode(Request);
 	if (MethodName == TEXT("add_variable_get_node")) return HandleAddVariableGetNode(Request);
@@ -4919,6 +5371,863 @@ FMCPResponse FBlueprintService::HandleSetVariableReplication(const FMCPRequest& 
 		Result->SetBoolField(TEXT("success"), true);
 		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
 		Result->SetObjectField(TEXT("variable"), BuildVariableJson(Blueprint, Blueprint->NewVariables[VariableIndex]));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleListComponents(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+
+	auto Task = [BlueprintPath]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+		if (!SCS)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Blueprint does not have a SimpleConstructionScript"));
+			return Result;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ComponentsJson;
+		for (USCS_Node* Node : SCS->GetAllNodes())
+		{
+			if (!Node)
+			{
+				continue;
+			}
+			ComponentsJson.Add(MakeShared<FJsonValueObject>(BuildComponentJson(Blueprint, SCS, Node)));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetArrayField(TEXT("components"), ComponentsJson);
+		Result->SetNumberField(TEXT("count"), ComponentsJson.Num());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleAddComponent(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString ComponentClassNameOrPath;
+	FString ComponentName;
+	FString ParentComponentName;
+	FString SocketName;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("component_class"), ComponentClassNameOrPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'component_class'"));
+	}
+	Request.Params->TryGetStringField(TEXT("component_name"), ComponentName);
+	Request.Params->TryGetStringField(TEXT("parent_component_name"), ParentComponentName);
+	Request.Params->TryGetStringField(TEXT("socket_name"), SocketName);
+
+	auto Task = [BlueprintPath, ComponentClassNameOrPath, ComponentName, ParentComponentName, SocketName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+		if (!SCS)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Blueprint does not have a SimpleConstructionScript"));
+			return Result;
+		}
+
+		UClass* ComponentClass = ResolveClassByNameOrPath(ComponentClassNameOrPath);
+		if (!ComponentClass)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Component class not found: %s"), *ComponentClassNameOrPath));
+			return Result;
+		}
+		if (!ComponentClass->IsChildOf(UActorComponent::StaticClass()))
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Class is not an ActorComponent: %s"), *ComponentClass->GetPathName()));
+			return Result;
+		}
+
+		const FName NewComponentName = ComponentName.IsEmpty() ? NAME_None : FName(*ComponentName);
+		if (!NewComponentName.IsNone() && SCS->FindSCSNode(NewComponentName))
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Component already exists: %s"), *ComponentName));
+			return Result;
+		}
+
+		USCS_Node* NewNode = SCS->CreateNode(ComponentClass, NewComponentName);
+		if (!NewNode)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Failed to create component node"));
+			return Result;
+		}
+
+		if (!ParentComponentName.IsEmpty())
+		{
+			USCS_Node* ParentNode = SCS->FindSCSNode(FName(*ParentComponentName));
+			if (!ParentNode)
+			{
+				Result->SetBoolField(TEXT("success"), false);
+				Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Parent component not found: %s"), *ParentComponentName));
+				return Result;
+			}
+
+			if (!Cast<USceneComponent>(ParentNode->ComponentTemplate))
+			{
+				Result->SetBoolField(TEXT("success"), false);
+				Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Parent component is not a scene component: %s"), *ParentComponentName));
+				return Result;
+			}
+			if (!Cast<USceneComponent>(NewNode->ComponentTemplate))
+			{
+				Result->SetBoolField(TEXT("success"), false);
+				Result->SetStringField(TEXT("error"), TEXT("Only scene components can be attached to a parent component"));
+				return Result;
+			}
+
+			ParentNode->AddChildNode(NewNode, true);
+			NewNode->SetParent(ParentNode);
+		}
+		else
+		{
+			SCS->AddNode(NewNode);
+		}
+
+		if (!SocketName.IsEmpty())
+		{
+			NewNode->Modify();
+			NewNode->AttachToName = FName(*SocketName);
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetObjectField(TEXT("component"), BuildComponentJson(Blueprint, SCS, NewNode));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleRemoveComponent(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString ComponentName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("component_name"), ComponentName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'component_name'"));
+	}
+
+	auto Task = [BlueprintPath, ComponentName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+		if (!SCS)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Blueprint does not have a SimpleConstructionScript"));
+			return Result;
+		}
+
+		USCS_Node* TargetNode = SCS->FindSCSNode(FName(*ComponentName));
+		if (!TargetNode)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Component not found: %s"), *ComponentName));
+			return Result;
+		}
+
+		SCS->RemoveNodeAndPromoteChildren(TargetNode);
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("removed_component"), ComponentName);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleRenameComponent(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString ComponentName;
+	FString NewComponentName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("component_name"), ComponentName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'component_name'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("new_component_name"), NewComponentName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'new_component_name'"));
+	}
+
+	auto Task = [BlueprintPath, ComponentName, NewComponentName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+		if (!SCS)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Blueprint does not have a SimpleConstructionScript"));
+			return Result;
+		}
+
+		USCS_Node* Node = SCS->FindSCSNode(FName(*ComponentName));
+		if (!Node)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Component not found: %s"), *ComponentName));
+			return Result;
+		}
+
+		const FName NewName(*NewComponentName);
+		if (Node->GetVariableName() != NewName && SCS->FindSCSNode(NewName))
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("A component with that name already exists: %s"), *NewComponentName));
+			return Result;
+		}
+
+		FBlueprintEditorUtils::RenameComponentMemberVariable(Blueprint, Node, NewName);
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		USCS_Node* RenamedNode = SCS->FindSCSNode(NewName);
+		if (!RenamedNode)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Component rename failed"));
+			return Result;
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("old_component_name"), ComponentName);
+		Result->SetStringField(TEXT("new_component_name"), NewComponentName);
+		Result->SetObjectField(TEXT("component"), BuildComponentJson(Blueprint, SCS, RenamedNode));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleSetRootComponent(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString ComponentName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("component_name"), ComponentName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'component_name'"));
+	}
+
+	auto Task = [BlueprintPath, ComponentName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+		if (!SCS)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Blueprint does not have a SimpleConstructionScript"));
+			return Result;
+		}
+
+		USCS_Node* TargetNode = SCS->FindSCSNode(FName(*ComponentName));
+		if (!TargetNode)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Component not found: %s"), *ComponentName));
+			return Result;
+		}
+		if (!Cast<USceneComponent>(TargetNode->ComponentTemplate))
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Only scene components can be set as root"));
+			return Result;
+		}
+
+		USCS_Node* CurrentRootNode = nullptr;
+		SCS->GetSceneRootComponentTemplate(true, &CurrentRootNode);
+
+		if (USCS_Node* CurrentParent = SCS->FindParentNode(TargetNode))
+		{
+			CurrentParent->RemoveChildNode(TargetNode);
+			TargetNode->Modify();
+			TargetNode->bIsParentComponentNative = false;
+			TargetNode->ParentComponentOrVariableName = NAME_None;
+			TargetNode->ParentComponentOwnerClassName = NAME_None;
+			TargetNode->AttachToName = NAME_None;
+		}
+
+		if (!TargetNode->IsRootNode())
+		{
+			SCS->AddNode(TargetNode);
+		}
+
+		if (CurrentRootNode && CurrentRootNode != TargetNode)
+		{
+			if (CurrentRootNode->IsRootNode())
+			{
+				SCS->RemoveNode(CurrentRootNode, false);
+			}
+			TargetNode->AddChildNode(CurrentRootNode, true);
+			CurrentRootNode->SetParent(TargetNode);
+		}
+
+		SCS->ValidateSceneRootNodes();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetObjectField(TEXT("component"), BuildComponentJson(Blueprint, SCS, TargetNode));
+		Result->SetStringField(TEXT("root_component_name"), TargetNode->GetVariableName().ToString());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleAttachComponent(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString ComponentName;
+	FString ParentComponentName;
+	FString SocketName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("component_name"), ComponentName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'component_name'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("parent_component_name"), ParentComponentName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parent_component_name'"));
+	}
+	Request.Params->TryGetStringField(TEXT("socket_name"), SocketName);
+
+	auto Task = [BlueprintPath, ComponentName, ParentComponentName, SocketName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+		if (!SCS)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Blueprint does not have a SimpleConstructionScript"));
+			return Result;
+		}
+
+		USCS_Node* ChildNode = SCS->FindSCSNode(FName(*ComponentName));
+		USCS_Node* ParentNode = SCS->FindSCSNode(FName(*ParentComponentName));
+		if (!ChildNode)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Component not found: %s"), *ComponentName));
+			return Result;
+		}
+		if (!ParentNode)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Parent component not found: %s"), *ParentComponentName));
+			return Result;
+		}
+		if (ChildNode == ParentNode)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Cannot attach a component to itself"));
+			return Result;
+		}
+		if (!Cast<USceneComponent>(ChildNode->ComponentTemplate) || !Cast<USceneComponent>(ParentNode->ComponentTemplate))
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Only scene components can be attached"));
+			return Result;
+		}
+		if (ParentNode->IsChildOf(ChildNode))
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Attachment would create a cycle in the component hierarchy"));
+			return Result;
+		}
+
+		if (ChildNode->IsRootNode())
+		{
+			SCS->RemoveNode(ChildNode, false);
+		}
+		else if (USCS_Node* ExistingParent = SCS->FindParentNode(ChildNode))
+		{
+			ExistingParent->RemoveChildNode(ChildNode);
+		}
+
+		ParentNode->AddChildNode(ChildNode, true);
+		ChildNode->SetParent(ParentNode);
+		ChildNode->Modify();
+		ChildNode->AttachToName = SocketName.IsEmpty() ? NAME_None : FName(*SocketName);
+
+		SCS->ValidateSceneRootNodes();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetObjectField(TEXT("component"), BuildComponentJson(Blueprint, SCS, ChildNode));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleDetachComponent(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString ComponentName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("component_name"), ComponentName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'component_name'"));
+	}
+
+	auto Task = [BlueprintPath, ComponentName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+		if (!SCS)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Blueprint does not have a SimpleConstructionScript"));
+			return Result;
+		}
+
+		USCS_Node* Node = SCS->FindSCSNode(FName(*ComponentName));
+		if (!Node)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Component not found: %s"), *ComponentName));
+			return Result;
+		}
+
+		const bool bWasRoot = Node->IsRootNode();
+		if (USCS_Node* ParentNode = SCS->FindParentNode(Node))
+		{
+			ParentNode->RemoveChildNode(Node);
+		}
+
+		Node->Modify();
+		Node->bIsParentComponentNative = false;
+		Node->ParentComponentOrVariableName = NAME_None;
+		Node->ParentComponentOwnerClassName = NAME_None;
+		Node->AttachToName = NAME_None;
+
+		if (!bWasRoot)
+		{
+			SCS->AddNode(Node);
+		}
+
+		SCS->ValidateSceneRootNodes();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetObjectField(TEXT("component"), BuildComponentJson(Blueprint, SCS, Node));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleSetComponentProperty(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString ComponentName;
+	FString PropertyName;
+	FString ValueText;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("component_name"), ComponentName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'component_name'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("property_name"), PropertyName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'property_name'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("value"), ValueText))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'value'"));
+	}
+
+	auto Task = [BlueprintPath, ComponentName, PropertyName, ValueText]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+		if (!SCS)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Blueprint does not have a SimpleConstructionScript"));
+			return Result;
+		}
+
+		USCS_Node* Node = SCS->FindSCSNode(FName(*ComponentName));
+		if (!Node || !Node->ComponentTemplate)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Component not found: %s"), *ComponentName));
+			return Result;
+		}
+
+		UActorComponent* ComponentTemplate = Node->ComponentTemplate;
+		FProperty* Property = FindPropertyByNameCaseInsensitive(ComponentTemplate->GetClass(), PropertyName);
+		if (!Property)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Property not found on %s: %s"), *ComponentTemplate->GetClass()->GetName(), *PropertyName));
+			return Result;
+		}
+
+		ComponentTemplate->Modify();
+		void* PropertyValuePtr = Property->ContainerPtrToValuePtr<void>(ComponentTemplate);
+		const TCHAR* ImportEnd = Property->ImportText_Direct(*ValueText, PropertyValuePtr, ComponentTemplate, PPF_None);
+		if (ImportEnd == nullptr)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Failed to parse value for property '%s'"), *PropertyName));
+			return Result;
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		FString ExportedValue;
+		Property->ExportTextItem_Direct(ExportedValue, PropertyValuePtr, nullptr, ComponentTemplate, PPF_None);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("component_name"), Node->GetVariableName().ToString());
+		Result->SetStringField(TEXT("property_name"), Property->GetName());
+		Result->SetStringField(TEXT("value"), ExportedValue);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleGetComponentProperty(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString ComponentName;
+	FString PropertyName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("component_name"), ComponentName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'component_name'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("property_name"), PropertyName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'property_name'"));
+	}
+
+	auto Task = [BlueprintPath, ComponentName, PropertyName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+		if (!SCS)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Blueprint does not have a SimpleConstructionScript"));
+			return Result;
+		}
+
+		USCS_Node* Node = SCS->FindSCSNode(FName(*ComponentName));
+		if (!Node || !Node->ComponentTemplate)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Component not found: %s"), *ComponentName));
+			return Result;
+		}
+
+		UActorComponent* ComponentTemplate = Node->ComponentTemplate;
+		FProperty* Property = FindPropertyByNameCaseInsensitive(ComponentTemplate->GetClass(), PropertyName);
+		if (!Property)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Property not found on %s: %s"), *ComponentTemplate->GetClass()->GetName(), *PropertyName));
+			return Result;
+		}
+
+		const void* PropertyValuePtr = Property->ContainerPtrToValuePtr<void>(ComponentTemplate);
+		FString ExportedValue;
+		Property->ExportTextItem_Direct(ExportedValue, PropertyValuePtr, nullptr, ComponentTemplate, PPF_None);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("component_name"), Node->GetVariableName().ToString());
+		Result->SetStringField(TEXT("property_name"), Property->GetName());
+		Result->SetStringField(TEXT("value"), ExportedValue);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleSetComponentTransformDefault(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString ComponentName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("component_name"), ComponentName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'component_name'"));
+	}
+
+	FVector RelativeLocation = FVector::ZeroVector;
+	FRotator RelativeRotation = FRotator::ZeroRotator;
+	FVector RelativeScale = FVector(1.0f, 1.0f, 1.0f);
+	bool bHasLocation = false;
+	bool bHasRotation = false;
+	bool bHasScale = false;
+	FString ParseError;
+
+	if (!ParseVectorParam(Request.Params, TEXT("location"), RelativeLocation, ParseError, bHasLocation))
+	{
+		return InvalidParams(Request.Id, ParseError);
+	}
+	if (!ParseRotatorParam(Request.Params, TEXT("rotation"), RelativeRotation, ParseError, bHasRotation))
+	{
+		return InvalidParams(Request.Id, ParseError);
+	}
+	if (!ParseVectorParam(Request.Params, TEXT("scale"), RelativeScale, ParseError, bHasScale))
+	{
+		return InvalidParams(Request.Id, ParseError);
+	}
+	if (!bHasLocation && !bHasRotation && !bHasScale)
+	{
+		return InvalidParams(Request.Id, TEXT("At least one of 'location', 'rotation', or 'scale' is required"));
+	}
+
+	auto Task = [BlueprintPath, ComponentName, bHasLocation, RelativeLocation, bHasRotation, RelativeRotation, bHasScale, RelativeScale]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+		if (!SCS)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Blueprint does not have a SimpleConstructionScript"));
+			return Result;
+		}
+
+		USCS_Node* Node = SCS->FindSCSNode(FName(*ComponentName));
+		if (!Node)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Component not found: %s"), *ComponentName));
+			return Result;
+		}
+
+		USceneComponent* SceneTemplate = Cast<USceneComponent>(Node->ComponentTemplate);
+		if (!SceneTemplate)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Component is not a scene component"));
+			return Result;
+		}
+
+		SceneTemplate->Modify();
+		if (bHasLocation)
+		{
+			SceneTemplate->SetRelativeLocation_Direct(RelativeLocation);
+		}
+		if (bHasRotation)
+		{
+			SceneTemplate->SetRelativeRotation_Direct(RelativeRotation);
+		}
+		if (bHasScale)
+		{
+			SceneTemplate->SetRelativeScale3D_Direct(RelativeScale);
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetObjectField(TEXT("component"), BuildComponentJson(Blueprint, SCS, Node));
 		return Result;
 	};
 

@@ -54,6 +54,16 @@ private:
 	FMCPResponse HandleSetVariableSaveGame(const FMCPRequest& Request);
 	FMCPResponse HandleSetVariableTransient(const FMCPRequest& Request);
 	FMCPResponse HandleSetVariableReplication(const FMCPRequest& Request);
+	FMCPResponse HandleListComponents(const FMCPRequest& Request);
+	FMCPResponse HandleAddComponent(const FMCPRequest& Request);
+	FMCPResponse HandleRemoveComponent(const FMCPRequest& Request);
+	FMCPResponse HandleRenameComponent(const FMCPRequest& Request);
+	FMCPResponse HandleSetRootComponent(const FMCPRequest& Request);
+	FMCPResponse HandleAttachComponent(const FMCPRequest& Request);
+	FMCPResponse HandleDetachComponent(const FMCPRequest& Request);
+	FMCPResponse HandleSetComponentProperty(const FMCPRequest& Request);
+	FMCPResponse HandleGetComponentProperty(const FMCPRequest& Request);
+	FMCPResponse HandleSetComponentTransformDefault(const FMCPRequest& Request);
 	FMCPResponse HandleAddEventNode(const FMCPRequest& Request);
 	FMCPResponse HandleAddCallFunctionNode(const FMCPRequest& Request);
 	FMCPResponse HandleAddVariableGetNode(const FMCPRequest& Request);
