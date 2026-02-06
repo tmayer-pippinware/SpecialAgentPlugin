@@ -59,6 +59,7 @@ public class SpecialAgent : ModuleRules
 				"NavigationSystem",
 				"AIModule",
 				"ToolMenus",
+				"BlueprintGraph",
 			}
 		);
 		

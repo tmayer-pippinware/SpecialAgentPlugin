@@ -15,6 +15,7 @@
 #include "Services/NavigationService.h"
 #include "Services/GameplayService.h"
 #include "Services/UtilityService.h"
+#include "Services/BlueprintService.h"
 
 namespace
 {
@@ -52,6 +53,7 @@ FMCPRequestRouter::FMCPRequestRouter()
 	RegisterService(TEXT("navigation"), MakeShared<FNavigationService>());
 	RegisterService(TEXT("gameplay"), MakeShared<FGameplayService>());
 	RegisterService(TEXT("utility"), MakeShared<FUtilityService>());
+	RegisterService(TEXT("blueprint"), MakeShared<FBlueprintService>());
 
 	UE_LOG(LogTemp, Log, TEXT("SpecialAgent: Registered %d services"), Services.Num());
 }

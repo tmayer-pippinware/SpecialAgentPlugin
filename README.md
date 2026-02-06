@@ -1,4 +1,4 @@
-# SpecialAgent
+﻿# SpecialAgent
 
 **Connect AI to Unreal Engine 5**
 
@@ -49,6 +49,19 @@ This is the unlimited foundation. If you can script it, AI can do it.
 | **Navigation** | Rebuild NavMesh, test pathfinding |
 | **Performance** | Analyze statistics, detect overlaps |
 | **Organization** | Folders, tags, labels, selection management |
+
+#### Blueprint Graph Authoring
+
+Native Blueprint graph tools for node-based authoring workflows:
+
+- `blueprint/list_graph_nodes`
+- `blueprint/create_variable`
+- `blueprint/add_event_node`
+- `blueprint/add_call_function_node`
+- `blueprint/add_variable_get_node`
+- `blueprint/set_pin_default_value`
+- `blueprint/connect_pins`
+- `blueprint/compile_blueprint`
 
 ### Visual Feedback Loop
 
@@ -123,6 +136,7 @@ Add SpecialAgent to your MCP client configuration:
 Your AI assistant now has access to:
 - Python execution with full UE5 API
 - 71+ level design tools
+- Native Blueprint graph authoring tools
 - Viewport screenshot capture
 - Editor utilities (save, undo, redo)
 
@@ -133,6 +147,7 @@ Your AI assistant now has access to:
 | Service | Methods | Description |
 |---------|:-------:|-------------|
 | **Python** | 3 | Execute scripts, run files, list modules |
+| **Blueprint** | 8 | Create variables, add nodes, connect pins, and compile Blueprints |
 | **Screenshot** | 2 | Capture viewport for AI vision |
 | **World** | 30+ | Actor manipulation and spatial queries |
 | **Assets** | 4 | Content Browser search and inspection |
@@ -149,6 +164,16 @@ Your AI assistant now has access to:
 ---
 
 ## Example Workflows
+
+### Build Blueprint Logic (via Tools)
+
+```
+1. blueprint/create_variable → Add member variables
+2. blueprint/add_event_node → Add BeginPlay/Tick events
+3. blueprint/add_call_function_node → Add function call nodes
+4. blueprint/connect_pins → Wire execution/data pins
+5. blueprint/compile_blueprint → Validate and compile changes
+```
 
 ### Populate a Forest (via Tools)
 
