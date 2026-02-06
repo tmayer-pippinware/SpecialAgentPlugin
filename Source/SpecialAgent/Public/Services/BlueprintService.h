@@ -36,6 +36,12 @@ private:
 	FMCPResponse HandleReparentBlueprint(const FMCPRequest& Request);
 	FMCPResponse HandleGetBlueprintInfo(const FMCPRequest& Request);
 	FMCPResponse HandleSetClassSettings(const FMCPRequest& Request);
+	FMCPResponse HandleListGraphs(const FMCPRequest& Request);
+	FMCPResponse HandleCreateGraph(const FMCPRequest& Request);
+	FMCPResponse HandleRenameGraph(const FMCPRequest& Request);
+	FMCPResponse HandleDeleteGraph(const FMCPRequest& Request);
+	FMCPResponse HandleSetGraphMetadata(const FMCPRequest& Request);
+	FMCPResponse HandleFormatGraph(const FMCPRequest& Request);
 	FMCPResponse HandleListGraphNodes(const FMCPRequest& Request);
 	FMCPResponse HandleCreateVariable(const FMCPRequest& Request);
 	FMCPResponse HandleAddEventNode(const FMCPRequest& Request);

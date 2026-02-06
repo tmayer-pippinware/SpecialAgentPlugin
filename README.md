@@ -62,6 +62,20 @@ Native Blueprint graph tools for node-based authoring workflows:
 - `blueprint/set_pin_default_value`
 - `blueprint/connect_pins`
 - `blueprint/compile_blueprint`
+- `blueprint/create_blueprint`
+- `blueprint/duplicate_blueprint`
+- `blueprint/rename_blueprint`
+- `blueprint/delete_blueprint`
+- `blueprint/save_blueprint`
+- `blueprint/reparent_blueprint`
+- `blueprint/get_blueprint_info`
+- `blueprint/set_class_settings`
+- `blueprint/list_graphs`
+- `blueprint/create_graph`
+- `blueprint/rename_graph`
+- `blueprint/delete_graph`
+- `blueprint/set_graph_metadata`
+- `blueprint/format_graph`
 
 ### Visual Feedback Loop
 
@@ -147,7 +161,7 @@ Your AI assistant now has access to:
 | Service | Methods | Description |
 |---------|:-------:|-------------|
 | **Python** | 3 | Execute scripts, run files, list modules |
-| **Blueprint** | 8 | Create variables, add nodes, connect pins, and compile Blueprints |
+| **Blueprint** | 22 | Blueprint asset lifecycle, graph management, node authoring, and compile support |
 | **Screenshot** | 2 | Capture viewport for AI vision |
 | **World** | 30+ | Actor manipulation and spatial queries |
 | **Assets** | 4 | Content Browser search and inspection |
@@ -172,7 +186,8 @@ Your AI assistant now has access to:
 2. blueprint/add_event_node → Add BeginPlay/Tick events
 3. blueprint/add_call_function_node → Add function call nodes
 4. blueprint/connect_pins → Wire execution/data pins
-5. blueprint/compile_blueprint → Validate and compile changes
+5. blueprint/set_graph_metadata or blueprint/format_graph → Organize and polish graphs
+6. blueprint/compile_blueprint → Validate and compile changes
 ```
 
 ### Populate a Forest (via Tools)
