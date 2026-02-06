@@ -122,6 +122,14 @@ Native Blueprint graph tools for node-based authoring workflows:
 - `blueprint/set_node_comment`
 - `blueprint/collapse_nodes_to_function`
 - `blueprint/collapse_nodes_to_macro`
+- `blueprint/list_node_pins`
+- `blueprint/disconnect_pins`
+- `blueprint/break_pin_links`
+- `blueprint/break_all_node_links`
+- `blueprint/reset_pin_default_value`
+- `blueprint/split_struct_pin`
+- `blueprint/recombine_struct_pin`
+- `blueprint/promote_pin_to_variable`
 
 ### Visual Feedback Loop
 
@@ -207,7 +215,7 @@ Your AI assistant now has access to:
 | Service | Methods | Description |
 |---------|:-------:|-------------|
 | **Python** | 3 | Execute scripts, run files, list modules |
-| **Blueprint** | 68 | Blueprint asset lifecycle, graph management, variable authoring, component SCS authoring, function/macro/dispatcher authoring, node authoring, and compile support |
+| **Blueprint** | 76 | Blueprint asset lifecycle, graph management, variable authoring, component SCS authoring, function/macro/dispatcher authoring, node authoring, pin operations, and compile support |
 | **Screenshot** | 2 | Capture viewport for AI vision |
 | **World** | 30+ | Actor manipulation and spatial queries |
 | **Assets** | 4 | Content Browser search and inspection |

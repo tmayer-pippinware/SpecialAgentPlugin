@@ -25,6 +25,7 @@
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
 #include "EdGraphSchema_K2.h"
+#include "EdGraphSchema_K2_Actions.h"
 #include "EdGraphNode_Comment.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
@@ -175,6 +176,210 @@ namespace
 			default:
 				return TEXT("none");
 		}
+	}
+
+	static FString PinDirectionToString(const EEdGraphPinDirection Direction)
+	{
+		switch (Direction)
+		{
+			case EGPD_Input:
+				return TEXT("input");
+			case EGPD_Output:
+				return TEXT("output");
+			default:
+				return TEXT("unknown");
+		}
+	}
+
+	static FString BuildPinPath(const UEdGraphPin* Pin)
+	{
+		if (!Pin)
+		{
+			return FString();
+		}
+		if (Pin->ParentPin)
+		{
+			return FString::Printf(TEXT("%s.%s"), *BuildPinPath(Pin->ParentPin), *Pin->PinName.ToString());
+		}
+		return Pin->PinName.ToString();
+	}
+
+	static void GatherPinRecursive(const UEdGraphPin* Pin, TArray<const UEdGraphPin*>& OutPins, TSet<const UEdGraphPin*>& SeenPins)
+	{
+		if (!Pin || SeenPins.Contains(Pin))
+		{
+			return;
+		}
+
+		SeenPins.Add(Pin);
+		OutPins.Add(Pin);
+		for (const UEdGraphPin* SubPin : Pin->SubPins)
+		{
+			GatherPinRecursive(SubPin, OutPins, SeenPins);
+		}
+	}
+
+	static TArray<const UEdGraphPin*> GatherNodePins(const UEdGraphNode* Node)
+	{
+		TArray<const UEdGraphPin*> Pins;
+		if (!Node)
+		{
+			return Pins;
+		}
+
+		TSet<const UEdGraphPin*> SeenPins;
+		for (const UEdGraphPin* Pin : Node->Pins)
+		{
+			if (!Pin || Pin->ParentPin)
+			{
+				continue;
+			}
+			GatherPinRecursive(Pin, Pins, SeenPins);
+		}
+
+		// Fallback: include any pins not reached through top-level traversal.
+		for (const UEdGraphPin* Pin : Node->Pins)
+		{
+			if (Pin && !SeenPins.Contains(Pin))
+			{
+				SeenPins.Add(Pin);
+				Pins.Add(Pin);
+			}
+		}
+
+		return Pins;
+	}
+
+	static UEdGraphPin* FindPinByPathOrName(UEdGraphNode* Node, const FString& PinIdentifier)
+	{
+		if (!Node)
+		{
+			return nullptr;
+		}
+
+		const FString TrimmedIdentifier = PinIdentifier.TrimStartAndEnd();
+		if (TrimmedIdentifier.IsEmpty())
+		{
+			return nullptr;
+		}
+
+		const TArray<const UEdGraphPin*> AllPins = GatherNodePins(Node);
+		for (const UEdGraphPin* Pin : AllPins)
+		{
+			if (!Pin)
+			{
+				continue;
+			}
+			if (BuildPinPath(Pin).Equals(TrimmedIdentifier, ESearchCase::CaseSensitive))
+			{
+				return const_cast<UEdGraphPin*>(Pin);
+			}
+		}
+
+		for (const UEdGraphPin* Pin : AllPins)
+		{
+			if (!Pin)
+			{
+				continue;
+			}
+			if (BuildPinPath(Pin).Equals(TrimmedIdentifier, ESearchCase::IgnoreCase))
+			{
+				return const_cast<UEdGraphPin*>(Pin);
+			}
+		}
+
+		for (const UEdGraphPin* Pin : AllPins)
+		{
+			if (!Pin)
+			{
+				continue;
+			}
+			if (Pin->PinName.ToString().Equals(TrimmedIdentifier, ESearchCase::CaseSensitive))
+			{
+				return const_cast<UEdGraphPin*>(Pin);
+			}
+		}
+
+		for (const UEdGraphPin* Pin : AllPins)
+		{
+			if (!Pin)
+			{
+				continue;
+			}
+			if (Pin->PinName.ToString().Equals(TrimmedIdentifier, ESearchCase::IgnoreCase))
+			{
+				return const_cast<UEdGraphPin*>(Pin);
+			}
+		}
+
+		return nullptr;
+	}
+
+	static TSharedPtr<FJsonObject> BuildPinJsonDetailed(const UEdGraphPin* Pin)
+	{
+		TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
+		if (!Pin)
+		{
+			PinObj->SetStringField(TEXT("pin_name"), TEXT(""));
+			return PinObj;
+		}
+
+		PinObj->SetStringField(TEXT("pin_name"), Pin->PinName.ToString());
+		PinObj->SetStringField(TEXT("pin_path"), BuildPinPath(Pin));
+		PinObj->SetStringField(TEXT("direction"), PinDirectionToString(Pin->Direction));
+		PinObj->SetStringField(TEXT("category"), Pin->PinType.PinCategory.ToString());
+		PinObj->SetStringField(TEXT("container_type"), PinContainerTypeToString(Pin->PinType.ContainerType));
+		PinObj->SetBoolField(TEXT("is_const"), Pin->PinType.bIsConst);
+		PinObj->SetBoolField(TEXT("is_reference"), Pin->PinType.bIsReference);
+		PinObj->SetBoolField(TEXT("is_linked"), Pin->LinkedTo.Num() > 0);
+		PinObj->SetBoolField(TEXT("is_split_parent"), Pin->SubPins.Num() > 0);
+		PinObj->SetBoolField(TEXT("is_split_child"), Pin->ParentPin != nullptr);
+		PinObj->SetBoolField(TEXT("is_orphaned"), Pin->bOrphanedPin);
+		PinObj->SetStringField(TEXT("default_value"), Pin->GetDefaultAsString());
+
+		if (Pin->PinType.PinSubCategory != NAME_None)
+		{
+			PinObj->SetStringField(TEXT("subcategory"), Pin->PinType.PinSubCategory.ToString());
+		}
+		if (Pin->PinType.PinSubCategoryObject.IsValid())
+		{
+			PinObj->SetStringField(TEXT("subcategory_object"), Pin->PinType.PinSubCategoryObject->GetPathName());
+		}
+		if (Pin->ParentPin)
+		{
+			PinObj->SetStringField(TEXT("parent_pin_path"), BuildPinPath(Pin->ParentPin));
+		}
+
+		TArray<TSharedPtr<FJsonValue>> SubPinsJson;
+		for (const UEdGraphPin* SubPin : Pin->SubPins)
+		{
+			if (!SubPin)
+			{
+				continue;
+			}
+			SubPinsJson.Add(MakeShared<FJsonValueString>(BuildPinPath(SubPin)));
+		}
+		PinObj->SetArrayField(TEXT("sub_pins"), SubPinsJson);
+
+		TArray<TSharedPtr<FJsonValue>> LinkedToJson;
+		for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
+		{
+			if (!LinkedPin || !LinkedPin->GetOwningNodeUnchecked())
+			{
+				continue;
+			}
+
+			const UEdGraphNode* LinkedNode = LinkedPin->GetOwningNodeUnchecked();
+			TSharedPtr<FJsonObject> LinkObj = MakeShared<FJsonObject>();
+			LinkObj->SetStringField(TEXT("node_id"), LinkedNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+			LinkObj->SetStringField(TEXT("node_title"), LinkedNode->GetNodeTitle(ENodeTitleType::ListView).ToString());
+			LinkObj->SetStringField(TEXT("pin_name"), LinkedPin->PinName.ToString());
+			LinkObj->SetStringField(TEXT("pin_path"), BuildPinPath(LinkedPin));
+			LinkObj->SetStringField(TEXT("direction"), PinDirectionToString(LinkedPin->Direction));
+			LinkedToJson.Add(MakeShared<FJsonValueObject>(LinkObj));
+		}
+		PinObj->SetArrayField(TEXT("linked_to"), LinkedToJson);
+		return PinObj;
 	}
 
 	static bool ParsePinContainerType(const FString& ContainerTypeName, EPinContainerType& OutContainerType, FString& OutError)
@@ -3821,6 +4026,274 @@ TArray<FMCPToolInfo> FBlueprintService::GetAvailableTools() const
 
 	{
 		FMCPToolInfo Tool;
+		Tool.Name = TEXT("list_node_pins");
+		Tool.Description = TEXT("List pins on a node, including split pins and linked connections.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeParam = MakeShared<FJsonObject>();
+		NodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeParam->SetStringField(TEXT("description"), TEXT("Node id."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_id"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("disconnect_pins");
+		Tool.Description = TEXT("Disconnect one specific link between two pins.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> FromNodeParam = MakeShared<FJsonObject>();
+		FromNodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		FromNodeParam->SetStringField(TEXT("description"), TEXT("Source node_id."));
+		Tool.Parameters->SetObjectField(TEXT("from_node_id"), FromNodeParam);
+
+		TSharedPtr<FJsonObject> FromPinParam = MakeShared<FJsonObject>();
+		FromPinParam->SetStringField(TEXT("type"), TEXT("string"));
+		FromPinParam->SetStringField(TEXT("description"), TEXT("Source pin name or split pin path."));
+		Tool.Parameters->SetObjectField(TEXT("from_pin"), FromPinParam);
+
+		TSharedPtr<FJsonObject> ToNodeParam = MakeShared<FJsonObject>();
+		ToNodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		ToNodeParam->SetStringField(TEXT("description"), TEXT("Target node_id."));
+		Tool.Parameters->SetObjectField(TEXT("to_node_id"), ToNodeParam);
+
+		TSharedPtr<FJsonObject> ToPinParam = MakeShared<FJsonObject>();
+		ToPinParam->SetStringField(TEXT("type"), TEXT("string"));
+		ToPinParam->SetStringField(TEXT("description"), TEXT("Target pin name or split pin path."));
+		Tool.Parameters->SetObjectField(TEXT("to_pin"), ToPinParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("from_node_id"));
+		Tool.RequiredParams.Add(TEXT("from_pin"));
+		Tool.RequiredParams.Add(TEXT("to_node_id"));
+		Tool.RequiredParams.Add(TEXT("to_pin"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("break_pin_links");
+		Tool.Description = TEXT("Break all connections on a pin.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeParam = MakeShared<FJsonObject>();
+		NodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeParam->SetStringField(TEXT("description"), TEXT("Node id."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeParam);
+
+		TSharedPtr<FJsonObject> PinParam = MakeShared<FJsonObject>();
+		PinParam->SetStringField(TEXT("type"), TEXT("string"));
+		PinParam->SetStringField(TEXT("description"), TEXT("Pin name or split pin path."));
+		Tool.Parameters->SetObjectField(TEXT("pin_name"), PinParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_id"));
+		Tool.RequiredParams.Add(TEXT("pin_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("break_all_node_links");
+		Tool.Description = TEXT("Break all links on every pin of a node.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeParam = MakeShared<FJsonObject>();
+		NodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeParam->SetStringField(TEXT("description"), TEXT("Node id."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_id"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("reset_pin_default_value");
+		Tool.Description = TEXT("Reset a pin default value to autogenerated default.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeParam = MakeShared<FJsonObject>();
+		NodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeParam->SetStringField(TEXT("description"), TEXT("Node id."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeParam);
+
+		TSharedPtr<FJsonObject> PinParam = MakeShared<FJsonObject>();
+		PinParam->SetStringField(TEXT("type"), TEXT("string"));
+		PinParam->SetStringField(TEXT("description"), TEXT("Pin name or split pin path."));
+		Tool.Parameters->SetObjectField(TEXT("pin_name"), PinParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_id"));
+		Tool.RequiredParams.Add(TEXT("pin_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("split_struct_pin");
+		Tool.Description = TEXT("Split a struct pin into member sub-pins.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeParam = MakeShared<FJsonObject>();
+		NodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeParam->SetStringField(TEXT("description"), TEXT("Node id."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeParam);
+
+		TSharedPtr<FJsonObject> PinParam = MakeShared<FJsonObject>();
+		PinParam->SetStringField(TEXT("type"), TEXT("string"));
+		PinParam->SetStringField(TEXT("description"), TEXT("Parent struct pin name or path."));
+		Tool.Parameters->SetObjectField(TEXT("pin_name"), PinParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_id"));
+		Tool.RequiredParams.Add(TEXT("pin_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("recombine_struct_pin");
+		Tool.Description = TEXT("Recombine a split struct pin back to a single pin.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeParam = MakeShared<FJsonObject>();
+		NodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeParam->SetStringField(TEXT("description"), TEXT("Node id."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeParam);
+
+		TSharedPtr<FJsonObject> PinParam = MakeShared<FJsonObject>();
+		PinParam->SetStringField(TEXT("type"), TEXT("string"));
+		PinParam->SetStringField(TEXT("description"), TEXT("A child split pin path or parent struct pin path."));
+		Tool.Parameters->SetObjectField(TEXT("pin_name"), PinParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_id"));
+		Tool.RequiredParams.Add(TEXT("pin_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("promote_pin_to_variable");
+		Tool.Description = TEXT("Promote a pin to a new variable and spawn a variable get/set node.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeParam = MakeShared<FJsonObject>();
+		NodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeParam->SetStringField(TEXT("description"), TEXT("Node id."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeParam);
+
+		TSharedPtr<FJsonObject> PinParam = MakeShared<FJsonObject>();
+		PinParam->SetStringField(TEXT("type"), TEXT("string"));
+		PinParam->SetStringField(TEXT("description"), TEXT("Pin name or split pin path."));
+		Tool.Parameters->SetObjectField(TEXT("pin_name"), PinParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Optional requested variable name."));
+		Tool.Parameters->SetObjectField(TEXT("variable_name"), NameParam);
+
+		TSharedPtr<FJsonObject> ScopeParam = MakeShared<FJsonObject>();
+		ScopeParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		ScopeParam->SetStringField(TEXT("description"), TEXT("true: member variable (default), false: local variable when supported."));
+		Tool.Parameters->SetObjectField(TEXT("to_member_variable"), ScopeParam);
+
+		TSharedPtr<FJsonObject> XParam = MakeShared<FJsonObject>();
+		XParam->SetStringField(TEXT("type"), TEXT("number"));
+		XParam->SetStringField(TEXT("description"), TEXT("Optional variable node X position."));
+		Tool.Parameters->SetObjectField(TEXT("x"), XParam);
+
+		TSharedPtr<FJsonObject> YParam = MakeShared<FJsonObject>();
+		YParam->SetStringField(TEXT("type"), TEXT("number"));
+		YParam->SetStringField(TEXT("description"), TEXT("Optional variable node Y position."));
+		Tool.Parameters->SetObjectField(TEXT("y"), YParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_id"));
+		Tool.RequiredParams.Add(TEXT("pin_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
 		Tool.Name = TEXT("set_pin_default_value");
 		Tool.Description = TEXT("Set a node pin default value string.");
 
@@ -3983,6 +4456,14 @@ FMCPResponse FBlueprintService::HandleRequest(const FMCPRequest& Request, const 
 	if (MethodName == TEXT("set_node_comment")) return HandleSetNodeComment(Request);
 	if (MethodName == TEXT("collapse_nodes_to_function")) return HandleCollapseNodesToFunction(Request);
 	if (MethodName == TEXT("collapse_nodes_to_macro")) return HandleCollapseNodesToMacro(Request);
+	if (MethodName == TEXT("list_node_pins")) return HandleListNodePins(Request);
+	if (MethodName == TEXT("disconnect_pins")) return HandleDisconnectPins(Request);
+	if (MethodName == TEXT("break_pin_links")) return HandleBreakPinLinks(Request);
+	if (MethodName == TEXT("break_all_node_links")) return HandleBreakAllNodeLinks(Request);
+	if (MethodName == TEXT("reset_pin_default_value")) return HandleResetPinDefaultValue(Request);
+	if (MethodName == TEXT("split_struct_pin")) return HandleSplitStructPin(Request);
+	if (MethodName == TEXT("recombine_struct_pin")) return HandleRecombineStructPin(Request);
+	if (MethodName == TEXT("promote_pin_to_variable")) return HandlePromotePinToVariable(Request);
 	if (MethodName == TEXT("set_pin_default_value")) return HandleSetPinDefaultValue(Request);
 	if (MethodName == TEXT("connect_pins")) return HandleConnectPins(Request);
 	if (MethodName == TEXT("compile_blueprint")) return HandleCompileBlueprint(Request);
@@ -4116,11 +4597,7 @@ UEdGraphNode* FBlueprintService::FindNodeById(UEdGraph* Graph, const FString& No
 
 UEdGraphPin* FBlueprintService::FindPinByName(UEdGraphNode* Node, const FString& PinName)
 {
-	if (!Node)
-	{
-		return nullptr;
-	}
-	return Node->FindPin(FName(*PinName), EGPD_MAX);
+	return FindPinByPathOrName(Node, PinName);
 }
 
 FMCPResponse FBlueprintService::HandleCreateBlueprint(const FMCPRequest& Request)
@@ -10495,6 +10972,822 @@ FMCPResponse FBlueprintService::HandleCollapseNodesToMacro(const FMCPRequest& Re
 		{
 			Result->SetObjectField(TEXT("macro_node"), BuildNodeJson(MacroNode));
 		}
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleListNodePins(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString NodeId;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, GraphName, NodeId]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+			return Result;
+		}
+
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId);
+		if (!Node)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Could not resolve node by node_id"));
+			return Result;
+		}
+
+		TArray<const UEdGraphPin*> Pins = GatherNodePins(Node);
+		Pins.Sort([](const UEdGraphPin& A, const UEdGraphPin& B)
+		{
+			return BuildPinPath(&A).Compare(BuildPinPath(&B), ESearchCase::IgnoreCase) < 0;
+		});
+
+		TArray<TSharedPtr<FJsonValue>> PinsJson;
+		PinsJson.Reserve(Pins.Num());
+		for (const UEdGraphPin* Pin : Pins)
+		{
+			if (!Pin)
+			{
+				continue;
+			}
+			PinsJson.Add(MakeShared<FJsonValueObject>(BuildPinJsonDetailed(Pin)));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("node_id"), NodeId);
+		Result->SetArrayField(TEXT("pins"), PinsJson);
+		Result->SetNumberField(TEXT("count"), PinsJson.Num());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleDisconnectPins(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString FromNodeId;
+	FString FromPinName;
+	FString ToNodeId;
+	FString ToPinName;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("from_node_id"), FromNodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'from_node_id'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("from_pin"), FromPinName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'from_pin'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("to_node_id"), ToNodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'to_node_id'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("to_pin"), ToPinName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'to_pin'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, GraphName, FromNodeId, FromPinName, ToNodeId, ToPinName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+			return Result;
+		}
+
+		UEdGraphNode* FromNode = FindNodeById(Graph, FromNodeId);
+		UEdGraphNode* ToNode = FindNodeById(Graph, ToNodeId);
+		if (!FromNode || !ToNode)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Could not resolve from/to node by node_id"));
+			return Result;
+		}
+
+		UEdGraphPin* FromPin = FindPinByName(FromNode, FromPinName);
+		UEdGraphPin* ToPin = FindPinByName(ToNode, ToPinName);
+		if (!FromPin || !ToPin)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Could not resolve from/to pin by name/path"));
+			return Result;
+		}
+
+		if (!FromPin->LinkedTo.Contains(ToPin) && !ToPin->LinkedTo.Contains(FromPin))
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Pins are not currently connected"));
+			return Result;
+		}
+
+		const UEdGraphSchema* Schema = FromPin->GetSchema();
+		if (!Schema)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Graph schema unavailable"));
+			return Result;
+		}
+
+		Schema->BreakSinglePinLink(FromPin, ToPin);
+		FromNode->NodeConnectionListChanged();
+		ToNode->NodeConnectionListChanged();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("from_node_id"), FromNodeId);
+		Result->SetStringField(TEXT("from_pin"), BuildPinPath(FromPin));
+		Result->SetStringField(TEXT("to_node_id"), ToNodeId);
+		Result->SetStringField(TEXT("to_pin"), BuildPinPath(ToPin));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleBreakPinLinks(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString NodeId;
+	FString PinName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("pin_name"), PinName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'pin_name'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, GraphName, NodeId, PinName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+			return Result;
+		}
+
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId);
+		if (!Node)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Could not resolve node by node_id"));
+			return Result;
+		}
+
+		UEdGraphPin* Pin = FindPinByName(Node, PinName);
+		if (!Pin)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Could not resolve pin by name/path"));
+			return Result;
+		}
+
+		const int32 BrokenLinkCount = Pin->LinkedTo.Num();
+		if (const UEdGraphSchema* Schema = Pin->GetSchema())
+		{
+			Schema->BreakPinLinks(*Pin, true);
+		}
+		else
+		{
+			Pin->BreakAllPinLinks();
+		}
+
+		Node->NodeConnectionListChanged();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("node_id"), NodeId);
+		Result->SetStringField(TEXT("pin_name"), BuildPinPath(Pin));
+		Result->SetNumberField(TEXT("broken_link_count"), BrokenLinkCount);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleBreakAllNodeLinks(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString NodeId;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, GraphName, NodeId]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+			return Result;
+		}
+
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId);
+		if (!Node)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Could not resolve node by node_id"));
+			return Result;
+		}
+
+		int32 BrokenLinkCount = 0;
+		for (const UEdGraphPin* Pin : GatherNodePins(Node))
+		{
+			if (Pin)
+			{
+				BrokenLinkCount += Pin->LinkedTo.Num();
+			}
+		}
+
+		Node->BreakAllNodeLinks();
+		Node->NodeConnectionListChanged();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("node_id"), NodeId);
+		Result->SetNumberField(TEXT("broken_link_count"), BrokenLinkCount);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleResetPinDefaultValue(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString NodeId;
+	FString PinName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("pin_name"), PinName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'pin_name'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, GraphName, NodeId, PinName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			return Result;
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+			return Result;
+		}
+
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId);
+		if (!Node)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Could not resolve node by node_id"));
+			return Result;
+		}
+
+		UEdGraphPin* Pin = FindPinByName(Node, PinName);
+		if (!Pin)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), TEXT("Could not resolve pin by name/path"));
+			return Result;
+		}
+
+		if (const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>())
+		{
+			K2Schema->ResetPinToAutogeneratedDefaultValue(Pin, true);
+		}
+		else if (const UEdGraphSchema* Schema = Pin->GetSchema())
+		{
+			Schema->ResetPinToAutogeneratedDefaultValue(Pin, true);
+		}
+		Node->PinDefaultValueChanged(Pin);
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("node_id"), NodeId);
+		Result->SetStringField(TEXT("pin_name"), BuildPinPath(Pin));
+		Result->SetStringField(TEXT("default_value"), Pin->GetDefaultAsString());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleSplitStructPin(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString NodeId;
+	FString PinName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("pin_name"), PinName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'pin_name'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, GraphName, NodeId, PinName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId);
+		if (!Node)
+		{
+			return Fail(TEXT("Could not resolve node by node_id"));
+		}
+
+		UEdGraphPin* Pin = FindPinByName(Node, PinName);
+		if (!Pin)
+		{
+			return Fail(TEXT("Could not resolve pin by name/path"));
+		}
+
+		const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+		if (!K2Schema)
+		{
+			return Fail(TEXT("K2 schema unavailable"));
+		}
+		if (!K2Schema->CanSplitStructPin(*Pin))
+		{
+			return Fail(TEXT("Pin cannot be split"));
+		}
+
+		const FString PinPath = BuildPinPath(Pin);
+		K2Schema->SplitPin(Pin, true);
+
+		UEdGraphPin* SplitParentPin = FindPinByPathOrName(Node, PinPath);
+		if (!SplitParentPin)
+		{
+			SplitParentPin = FindPinByPathOrName(Node, Pin->PinName.ToString());
+		}
+		if (!SplitParentPin)
+		{
+			return Fail(TEXT("Pin split succeeded but parent pin could not be resolved"));
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("node_id"), NodeId);
+		Result->SetObjectField(TEXT("pin"), BuildPinJsonDetailed(SplitParentPin));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleRecombineStructPin(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString NodeId;
+	FString PinName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("pin_name"), PinName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'pin_name'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, GraphName, NodeId, PinName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId);
+		if (!Node)
+		{
+			return Fail(TEXT("Could not resolve node by node_id"));
+		}
+
+		UEdGraphPin* Pin = FindPinByName(Node, PinName);
+		if (!Pin)
+		{
+			return Fail(TEXT("Could not resolve pin by name/path"));
+		}
+
+		const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+		if (!K2Schema)
+		{
+			return Fail(TEXT("K2 schema unavailable"));
+		}
+
+		UEdGraphPin* PinToRecombine = Pin;
+		if (!K2Schema->CanRecombineStructPin(*PinToRecombine) && PinToRecombine->ParentPin && K2Schema->CanRecombineStructPin(*PinToRecombine->ParentPin))
+		{
+			PinToRecombine = PinToRecombine->ParentPin;
+		}
+		if (!K2Schema->CanRecombineStructPin(*PinToRecombine))
+		{
+			return Fail(TEXT("Pin cannot be recombined"));
+		}
+
+		FString RootPinName = PinToRecombine->PinName.ToString();
+		if (PinToRecombine->ParentPin)
+		{
+			RootPinName = PinToRecombine->ParentPin->PinName.ToString();
+		}
+
+		K2Schema->RecombinePin(PinToRecombine);
+		UEdGraphPin* RecombinedPin = FindPinByPathOrName(Node, RootPinName);
+		if (!RecombinedPin)
+		{
+			return Fail(TEXT("Pin recombine succeeded but pin could not be resolved"));
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("node_id"), NodeId);
+		Result->SetObjectField(TEXT("pin"), BuildPinJsonDetailed(RecombinedPin));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandlePromotePinToVariable(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString NodeId;
+	FString PinName;
+	FString RequestedVariableName;
+	bool bToMemberVariable = true;
+	double RequestedX = 0.0;
+	double RequestedY = 0.0;
+	const bool bHasX = Request.Params->TryGetNumberField(TEXT("x"), RequestedX);
+	const bool bHasY = Request.Params->TryGetNumberField(TEXT("y"), RequestedY);
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("pin_name"), PinName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'pin_name'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+	Request.Params->TryGetStringField(TEXT("variable_name"), RequestedVariableName);
+	Request.Params->TryGetBoolField(TEXT("to_member_variable"), bToMemberVariable);
+
+	auto Task = [BlueprintPath, GraphName, NodeId, PinName, RequestedVariableName, bToMemberVariable, bHasX, bHasY, RequestedX, RequestedY]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId);
+		if (!Node)
+		{
+			return Fail(TEXT("Could not resolve node by node_id"));
+		}
+
+		UEdGraphPin* Pin = FindPinByName(Node, PinName);
+		if (!Pin)
+		{
+			return Fail(TEXT("Could not resolve pin by name/path"));
+		}
+		if (Pin->bOrphanedPin)
+		{
+			return Fail(TEXT("Cannot promote orphaned pin"));
+		}
+
+		const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+		if (!K2Schema)
+		{
+			return Fail(TEXT("K2 schema unavailable"));
+		}
+		if (!K2Schema->CanPromotePinToVariable(*Pin, bToMemberVariable))
+		{
+			return Fail(TEXT("Pin cannot be promoted to variable"));
+		}
+
+		const FString PinPath = BuildPinPath(Pin);
+		const FString PinSimpleName = Pin->PinName.ToString();
+		FEdGraphPinType VariablePinType = Pin->PinType;
+		VariablePinType.bIsConst = false;
+		VariablePinType.bIsReference = false;
+		VariablePinType.bIsWeakPointer = false;
+
+		FName VariableName = NAME_None;
+		const FString TrimmedRequestedName = RequestedVariableName.TrimStartAndEnd();
+		if (!TrimmedRequestedName.IsEmpty())
+		{
+			VariableName = FName(*TrimmedRequestedName);
+		}
+		else
+		{
+			VariableName = FBlueprintEditorUtils::FindUniqueKismetName(Blueprint, bToMemberVariable ? TEXT("NewVar") : TEXT("NewLocalVar"));
+		}
+
+		bool bAddedVariable = false;
+		UEdGraph* FunctionGraph = nullptr;
+		if (bToMemberVariable)
+		{
+			bAddedVariable = FBlueprintEditorUtils::AddMemberVariable(Blueprint, VariableName, VariablePinType, Pin->GetDefaultAsString());
+		}
+		else
+		{
+			if (!FBlueprintEditorUtils::DoesSupportLocalVariables(Graph))
+			{
+				return Fail(TEXT("Target graph does not support local variables"));
+			}
+			FunctionGraph = FBlueprintEditorUtils::GetTopLevelGraph(Graph);
+			if (!FunctionGraph)
+			{
+				return Fail(TEXT("Could not resolve top-level graph for local variable"));
+			}
+			bAddedVariable = FBlueprintEditorUtils::AddLocalVariable(Blueprint, FunctionGraph, VariableName, VariablePinType, Pin->GetDefaultAsString());
+		}
+
+		if (!bAddedVariable)
+		{
+			return Fail(FString::Printf(TEXT("Failed to add variable '%s'"), *VariableName.ToString()));
+		}
+
+		UEdGraphPin* RefreshedPin = FindPinByPathOrName(Node, PinPath);
+		if (!RefreshedPin)
+		{
+			RefreshedPin = FindPinByPathOrName(Node, PinSimpleName);
+		}
+		if (!RefreshedPin)
+		{
+			return Fail(TEXT("Pin promotion created variable but target pin could not be resolved"));
+		}
+
+		FVector2f NewNodePos;
+		if (bHasX && bHasY)
+		{
+			NewNodePos = FVector2f(static_cast<float>(RequestedX), static_cast<float>(RequestedY));
+		}
+		else
+		{
+			NewNodePos.X = RefreshedPin->Direction == EGPD_Input ? Node->NodePosX - 200.0f : Node->NodePosX + 400.0f;
+			NewNodePos.Y = static_cast<float>(Node->NodePosY);
+		}
+
+		FEdGraphSchemaAction_K2NewNode NodeInfo;
+		if (RefreshedPin->Direction == EGPD_Input)
+		{
+			UK2Node_VariableGet* TemplateNode = NewObject<UK2Node_VariableGet>();
+			if (bToMemberVariable)
+			{
+				TemplateNode->VariableReference.SetSelfMember(VariableName);
+			}
+			else
+			{
+				TemplateNode->VariableReference.SetLocalMember(
+					VariableName,
+					FunctionGraph->GetName(),
+					FBlueprintEditorUtils::FindLocalVariableGuidByName(Blueprint, FunctionGraph, VariableName)
+				);
+			}
+			NodeInfo.NodeTemplate = TemplateNode;
+		}
+		else
+		{
+			UK2Node_VariableSet* TemplateNode = NewObject<UK2Node_VariableSet>();
+			if (bToMemberVariable)
+			{
+				TemplateNode->VariableReference.SetSelfMember(VariableName);
+			}
+			else
+			{
+				TemplateNode->VariableReference.SetLocalMember(
+					VariableName,
+					FunctionGraph->GetName(),
+					FBlueprintEditorUtils::FindLocalVariableGuidByName(Blueprint, FunctionGraph, VariableName)
+				);
+			}
+			NodeInfo.NodeTemplate = TemplateNode;
+		}
+
+		UEdGraphNode* PromotedNode = NodeInfo.PerformAction(Graph, RefreshedPin, NewNodePos, false);
+		if (!PromotedNode)
+		{
+			return Fail(TEXT("Variable created but failed to spawn promoted variable node"));
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("node_id"), NodeId);
+		Result->SetStringField(TEXT("pin_name"), BuildPinPath(RefreshedPin));
+		Result->SetStringField(TEXT("variable_name"), VariableName.ToString());
+		Result->SetStringField(TEXT("variable_scope"), bToMemberVariable ? TEXT("member") : TEXT("local"));
+		Result->SetObjectField(TEXT("promoted_node"), BuildNodeJson(PromotedNode));
 		return Result;
 	};
 

@@ -93,6 +93,14 @@ private:
 	FMCPResponse HandleSetNodeComment(const FMCPRequest& Request);
 	FMCPResponse HandleCollapseNodesToFunction(const FMCPRequest& Request);
 	FMCPResponse HandleCollapseNodesToMacro(const FMCPRequest& Request);
+	FMCPResponse HandleListNodePins(const FMCPRequest& Request);
+	FMCPResponse HandleDisconnectPins(const FMCPRequest& Request);
+	FMCPResponse HandleBreakPinLinks(const FMCPRequest& Request);
+	FMCPResponse HandleBreakAllNodeLinks(const FMCPRequest& Request);
+	FMCPResponse HandleResetPinDefaultValue(const FMCPRequest& Request);
+	FMCPResponse HandleSplitStructPin(const FMCPRequest& Request);
+	FMCPResponse HandleRecombineStructPin(const FMCPRequest& Request);
+	FMCPResponse HandlePromotePinToVariable(const FMCPRequest& Request);
 	FMCPResponse HandleSetPinDefaultValue(const FMCPRequest& Request);
 	FMCPResponse HandleConnectPins(const FMCPRequest& Request);
 	FMCPResponse HandleCompileBlueprint(const FMCPRequest& Request);
