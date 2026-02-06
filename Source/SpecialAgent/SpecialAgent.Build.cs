@@ -60,6 +60,7 @@ public class SpecialAgent : ModuleRules
 				"AIModule",
 				"ToolMenus",
 				"BlueprintGraph",
+				"BlueprintEditorLibrary",
 			}
 		);
 		
