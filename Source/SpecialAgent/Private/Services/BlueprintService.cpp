@@ -8,18 +8,24 @@
 #include "EditorAssetLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "EdGraphUtilities.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraph/EdGraphSchema.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_CustomEvent.h"
 #include "K2Node_EditablePinBase.h"
 #include "K2Node_Event.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
+#include "K2Node.h"
+#include "K2Node_Knot.h"
+#include "K2Node_MacroInstance.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
 #include "EdGraphSchema_K2.h"
+#include "EdGraphNode_Comment.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/EngineTypes.h"
@@ -1721,6 +1727,236 @@ namespace
 		DispatcherObj->SetArrayField(TEXT("signature_params"), SignatureParamsJson);
 		return DispatcherObj;
 	}
+
+	static bool ExtractStringArrayField(
+		const TSharedPtr<FJsonObject>& Params,
+		const TCHAR* FieldName,
+		TArray<FString>& OutValues,
+		FString& OutError
+	)
+	{
+		OutValues.Reset();
+		if (!Params.IsValid())
+		{
+			OutError = TEXT("Missing params object");
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+		if (!Params->TryGetArrayField(FieldName, Values))
+		{
+			OutError = FString::Printf(TEXT("Missing required parameter '%s'"), FieldName);
+			return false;
+		}
+		if (!Values || Values->Num() == 0)
+		{
+			OutError = FString::Printf(TEXT("Parameter '%s' must be a non-empty string array"), FieldName);
+			return false;
+		}
+
+		for (int32 Index = 0; Index < Values->Num(); ++Index)
+		{
+			const TSharedPtr<FJsonValue>& Value = (*Values)[Index];
+			FString StringValue;
+			if (!Value.IsValid() || !Value->TryGetString(StringValue))
+			{
+				OutError = FString::Printf(TEXT("Parameter '%s' index %d must be a string"), FieldName, Index);
+				return false;
+			}
+
+			StringValue = StringValue.TrimStartAndEnd();
+			if (StringValue.IsEmpty())
+			{
+				OutError = FString::Printf(TEXT("Parameter '%s' index %d must be non-empty"), FieldName, Index);
+				return false;
+			}
+
+			OutValues.Add(StringValue);
+		}
+
+		return true;
+	}
+
+	static bool FindNodesByIds(
+		UEdGraph* Graph,
+		const TArray<FString>& NodeIds,
+		TArray<UEdGraphNode*>& OutNodes,
+		FString& OutError
+	)
+	{
+		OutNodes.Reset();
+		if (!Graph)
+		{
+			OutError = TEXT("Graph not found");
+			return false;
+		}
+
+		TSet<FGuid> AddedGuids;
+		for (const FString& NodeId : NodeIds)
+		{
+			FGuid NodeGuid;
+			if (!FGuid::Parse(NodeId, NodeGuid))
+			{
+				OutError = FString::Printf(TEXT("Invalid node id format: %s"), *NodeId);
+				return false;
+			}
+
+			if (AddedGuids.Contains(NodeGuid))
+			{
+				continue;
+			}
+
+			UEdGraphNode* ResolvedNode = nullptr;
+			for (UEdGraphNode* Node : Graph->Nodes)
+			{
+				if (Node && Node->NodeGuid == NodeGuid)
+				{
+					ResolvedNode = Node;
+					break;
+				}
+			}
+
+			if (!ResolvedNode)
+			{
+				OutError = FString::Printf(TEXT("Node not found for node_id: %s"), *NodeId);
+				return false;
+			}
+
+			AddedGuids.Add(NodeGuid);
+			OutNodes.Add(ResolvedNode);
+		}
+
+		return OutNodes.Num() > 0;
+	}
+
+	static FVector2D ComputeAverageNodeLocation(const TArray<UEdGraphNode*>& Nodes)
+	{
+		if (Nodes.Num() == 0)
+		{
+			return FVector2D::ZeroVector;
+		}
+
+		double SumX = 0.0;
+		double SumY = 0.0;
+		for (UEdGraphNode* Node : Nodes)
+		{
+			if (!Node)
+			{
+				continue;
+			}
+			SumX += static_cast<double>(Node->NodePosX);
+			SumY += static_cast<double>(Node->NodePosY);
+		}
+
+		const double Count = static_cast<double>(Nodes.Num());
+		return FVector2D(SumX / Count, SumY / Count);
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> BuildNodesJsonArray(const TArray<UEdGraphNode*>& Nodes)
+	{
+		TArray<TSharedPtr<FJsonValue>> NodesJson;
+		NodesJson.Reserve(Nodes.Num());
+		for (UEdGraphNode* Node : Nodes)
+		{
+			if (!Node)
+			{
+				continue;
+			}
+
+			NodesJson.Add(MakeShared<FJsonValueObject>(BuildNodeJson(Node)));
+		}
+		return NodesJson;
+	}
+
+	static UEdGraphNode* SpawnNodeFromClass(UEdGraph* Graph, UClass* NodeClass, const int32 NodeX, const int32 NodeY)
+	{
+		if (!Graph || !NodeClass || !NodeClass->IsChildOf(UEdGraphNode::StaticClass()) || NodeClass->HasAnyClassFlags(CLASS_Abstract))
+		{
+			return nullptr;
+		}
+
+		UEdGraphNode* NewNode = NewObject<UEdGraphNode>(Graph, NodeClass);
+		if (!NewNode)
+		{
+			return nullptr;
+		}
+
+		if (Graph->HasAnyFlags(RF_Transactional))
+		{
+			NewNode->SetFlags(RF_Transactional);
+		}
+
+		Graph->AddNode(NewNode, true, false);
+		NewNode->CreateNewGuid();
+		NewNode->PostPlacedNewNode();
+		NewNode->AllocateDefaultPins();
+		NewNode->NodePosX = NodeX;
+		NewNode->NodePosY = NodeY;
+		NewNode->AutowireNewNode(nullptr);
+		return NewNode;
+	}
+
+	static UK2Node_CallFunction* SpawnSelfCallFunctionNode(UEdGraph* Graph, UBlueprint* Blueprint, const FName FunctionName, const FVector2D& NodePosition)
+	{
+		if (!Graph || !Blueprint || FunctionName.IsNone())
+		{
+			return nullptr;
+		}
+
+		UFunction* TargetFunction = nullptr;
+		if (Blueprint->SkeletonGeneratedClass)
+		{
+			TargetFunction = FindUField<UFunction>(Blueprint->SkeletonGeneratedClass, FunctionName);
+		}
+		if (!TargetFunction && Blueprint->GeneratedClass)
+		{
+			TargetFunction = FindUField<UFunction>(Blueprint->GeneratedClass, FunctionName);
+		}
+
+		FGraphNodeCreator<UK2Node_CallFunction> CallCreator(*Graph);
+		UK2Node_CallFunction* CallNode = CallCreator.CreateNode();
+		if (!CallNode)
+		{
+			return nullptr;
+		}
+
+		if (TargetFunction)
+		{
+			CallNode->SetFromFunction(TargetFunction);
+		}
+		else
+		{
+			CallNode->FunctionReference.SetSelfMember(FunctionName);
+		}
+
+		CallNode->NodePosX = static_cast<int32>(NodePosition.X);
+		CallNode->NodePosY = static_cast<int32>(NodePosition.Y);
+		CallCreator.Finalize();
+		CallNode->ReconstructNode();
+		return CallNode;
+	}
+
+	static UK2Node_MacroInstance* SpawnMacroInstanceNode(UEdGraph* Graph, UEdGraph* MacroGraph, const FVector2D& NodePosition)
+	{
+		if (!Graph || !MacroGraph)
+		{
+			return nullptr;
+		}
+
+		FGraphNodeCreator<UK2Node_MacroInstance> MacroCreator(*Graph);
+		UK2Node_MacroInstance* MacroNode = MacroCreator.CreateNode();
+		if (!MacroNode)
+		{
+			return nullptr;
+		}
+
+		MacroNode->SetMacroGraph(MacroGraph);
+		MacroNode->NodePosX = static_cast<int32>(NodePosition.X);
+		MacroNode->NodePosY = static_cast<int32>(NodePosition.Y);
+		MacroCreator.Finalize();
+		MacroNode->ReconstructNode();
+		return MacroNode;
+	}
 }
 
 FBlueprintService::FBlueprintService()
@@ -3205,6 +3441,386 @@ TArray<FMCPToolInfo> FBlueprintService::GetAvailableTools() const
 
 	{
 		FMCPToolInfo Tool;
+		Tool.Name = TEXT("add_node_by_class");
+		Tool.Description = TEXT("Spawn a graph node from a node class path or class name.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> ClassParam = MakeShared<FJsonObject>();
+		ClassParam->SetStringField(TEXT("type"), TEXT("string"));
+		ClassParam->SetStringField(TEXT("description"), TEXT("Node class path or class name (must derive from UEdGraphNode)."));
+		Tool.Parameters->SetObjectField(TEXT("node_class"), ClassParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> XParam = MakeShared<FJsonObject>();
+		XParam->SetStringField(TEXT("type"), TEXT("number"));
+		XParam->SetStringField(TEXT("description"), TEXT("Node X position (default: 0)."));
+		Tool.Parameters->SetObjectField(TEXT("x"), XParam);
+
+		TSharedPtr<FJsonObject> YParam = MakeShared<FJsonObject>();
+		YParam->SetStringField(TEXT("type"), TEXT("number"));
+		YParam->SetStringField(TEXT("description"), TEXT("Node Y position (default: 0)."));
+		Tool.Parameters->SetObjectField(TEXT("y"), YParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_class"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("add_custom_event_node");
+		Tool.Description = TEXT("Add a Custom Event node to a Blueprint graph.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> EventParam = MakeShared<FJsonObject>();
+		EventParam->SetStringField(TEXT("type"), TEXT("string"));
+		EventParam->SetStringField(TEXT("description"), TEXT("Custom event name."));
+		Tool.Parameters->SetObjectField(TEXT("event_name"), EventParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> XParam = MakeShared<FJsonObject>();
+		XParam->SetStringField(TEXT("type"), TEXT("number"));
+		XParam->SetStringField(TEXT("description"), TEXT("Node X position (default: 0)."));
+		Tool.Parameters->SetObjectField(TEXT("x"), XParam);
+
+		TSharedPtr<FJsonObject> YParam = MakeShared<FJsonObject>();
+		YParam->SetStringField(TEXT("type"), TEXT("number"));
+		YParam->SetStringField(TEXT("description"), TEXT("Node Y position (default: 0)."));
+		Tool.Parameters->SetObjectField(TEXT("y"), YParam);
+
+		TSharedPtr<FJsonObject> CallInEditorParam = MakeShared<FJsonObject>();
+		CallInEditorParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		CallInEditorParam->SetStringField(TEXT("description"), TEXT("Whether the custom event can be called in editor (default: false)."));
+		Tool.Parameters->SetObjectField(TEXT("call_in_editor"), CallInEditorParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("event_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("add_comment_node");
+		Tool.Description = TEXT("Add a comment box node to a Blueprint graph.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> CommentParam = MakeShared<FJsonObject>();
+		CommentParam->SetStringField(TEXT("type"), TEXT("string"));
+		CommentParam->SetStringField(TEXT("description"), TEXT("Comment text (default: Comment)."));
+		Tool.Parameters->SetObjectField(TEXT("comment"), CommentParam);
+
+		TSharedPtr<FJsonObject> XParam = MakeShared<FJsonObject>();
+		XParam->SetStringField(TEXT("type"), TEXT("number"));
+		XParam->SetStringField(TEXT("description"), TEXT("Node X position (default: 0)."));
+		Tool.Parameters->SetObjectField(TEXT("x"), XParam);
+
+		TSharedPtr<FJsonObject> YParam = MakeShared<FJsonObject>();
+		YParam->SetStringField(TEXT("type"), TEXT("number"));
+		YParam->SetStringField(TEXT("description"), TEXT("Node Y position (default: 0)."));
+		Tool.Parameters->SetObjectField(TEXT("y"), YParam);
+
+		TSharedPtr<FJsonObject> WidthParam = MakeShared<FJsonObject>();
+		WidthParam->SetStringField(TEXT("type"), TEXT("number"));
+		WidthParam->SetStringField(TEXT("description"), TEXT("Comment box width (default: 400)."));
+		Tool.Parameters->SetObjectField(TEXT("width"), WidthParam);
+
+		TSharedPtr<FJsonObject> HeightParam = MakeShared<FJsonObject>();
+		HeightParam->SetStringField(TEXT("type"), TEXT("number"));
+		HeightParam->SetStringField(TEXT("description"), TEXT("Comment box height (default: 200)."));
+		Tool.Parameters->SetObjectField(TEXT("height"), HeightParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("add_reroute_node");
+		Tool.Description = TEXT("Add a reroute (knot) node to a Blueprint graph.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> XParam = MakeShared<FJsonObject>();
+		XParam->SetStringField(TEXT("type"), TEXT("number"));
+		XParam->SetStringField(TEXT("description"), TEXT("Node X position (default: 0)."));
+		Tool.Parameters->SetObjectField(TEXT("x"), XParam);
+
+		TSharedPtr<FJsonObject> YParam = MakeShared<FJsonObject>();
+		YParam->SetStringField(TEXT("type"), TEXT("number"));
+		YParam->SetStringField(TEXT("description"), TEXT("Node Y position (default: 0)."));
+		Tool.Parameters->SetObjectField(TEXT("y"), YParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("delete_node");
+		Tool.Description = TEXT("Delete a node from a Blueprint graph.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeParam = MakeShared<FJsonObject>();
+		NodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeParam->SetStringField(TEXT("description"), TEXT("Node id to delete."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_id"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("duplicate_node");
+		Tool.Description = TEXT("Duplicate one or more nodes in a Blueprint graph.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeIdsParam = MakeShared<FJsonObject>();
+		NodeIdsParam->SetStringField(TEXT("type"), TEXT("array"));
+		NodeIdsParam->SetStringField(TEXT("description"), TEXT("Array of node ids to duplicate."));
+		Tool.Parameters->SetObjectField(TEXT("node_ids"), NodeIdsParam);
+
+		TSharedPtr<FJsonObject> OffsetXParam = MakeShared<FJsonObject>();
+		OffsetXParam->SetStringField(TEXT("type"), TEXT("number"));
+		OffsetXParam->SetStringField(TEXT("description"), TEXT("Duplicate offset X (default: 40)."));
+		Tool.Parameters->SetObjectField(TEXT("offset_x"), OffsetXParam);
+
+		TSharedPtr<FJsonObject> OffsetYParam = MakeShared<FJsonObject>();
+		OffsetYParam->SetStringField(TEXT("type"), TEXT("number"));
+		OffsetYParam->SetStringField(TEXT("description"), TEXT("Duplicate offset Y (default: 40)."));
+		Tool.Parameters->SetObjectField(TEXT("offset_y"), OffsetYParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_ids"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("move_node");
+		Tool.Description = TEXT("Move a node to absolute position or by delta.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeParam = MakeShared<FJsonObject>();
+		NodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeParam->SetStringField(TEXT("description"), TEXT("Node id to move."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeParam);
+
+		TSharedPtr<FJsonObject> XParam = MakeShared<FJsonObject>();
+		XParam->SetStringField(TEXT("type"), TEXT("number"));
+		XParam->SetStringField(TEXT("description"), TEXT("Absolute X position."));
+		Tool.Parameters->SetObjectField(TEXT("x"), XParam);
+
+		TSharedPtr<FJsonObject> YParam = MakeShared<FJsonObject>();
+		YParam->SetStringField(TEXT("type"), TEXT("number"));
+		YParam->SetStringField(TEXT("description"), TEXT("Absolute Y position."));
+		Tool.Parameters->SetObjectField(TEXT("y"), YParam);
+
+		TSharedPtr<FJsonObject> DeltaXParam = MakeShared<FJsonObject>();
+		DeltaXParam->SetStringField(TEXT("type"), TEXT("number"));
+		DeltaXParam->SetStringField(TEXT("description"), TEXT("Relative X delta."));
+		Tool.Parameters->SetObjectField(TEXT("delta_x"), DeltaXParam);
+
+		TSharedPtr<FJsonObject> DeltaYParam = MakeShared<FJsonObject>();
+		DeltaYParam->SetStringField(TEXT("type"), TEXT("number"));
+		DeltaYParam->SetStringField(TEXT("description"), TEXT("Relative Y delta."));
+		Tool.Parameters->SetObjectField(TEXT("delta_y"), DeltaYParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_id"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("rename_node");
+		Tool.Description = TEXT("Rename a node when the node type supports rename.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeParam = MakeShared<FJsonObject>();
+		NodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeParam->SetStringField(TEXT("description"), TEXT("Node id to rename."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("New node name."));
+		Tool.Parameters->SetObjectField(TEXT("new_name"), NameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_id"));
+		Tool.RequiredParams.Add(TEXT("new_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("set_node_comment");
+		Tool.Description = TEXT("Set the node comment text and optional bubble visibility.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeParam = MakeShared<FJsonObject>();
+		NodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeParam->SetStringField(TEXT("description"), TEXT("Node id to update."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeParam);
+
+		TSharedPtr<FJsonObject> CommentParam = MakeShared<FJsonObject>();
+		CommentParam->SetStringField(TEXT("type"), TEXT("string"));
+		CommentParam->SetStringField(TEXT("description"), TEXT("Node comment text."));
+		Tool.Parameters->SetObjectField(TEXT("comment"), CommentParam);
+
+		TSharedPtr<FJsonObject> BubbleParam = MakeShared<FJsonObject>();
+		BubbleParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		BubbleParam->SetStringField(TEXT("description"), TEXT("Comment bubble visibility override."));
+		Tool.Parameters->SetObjectField(TEXT("bubble_visible"), BubbleParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_id"));
+		Tool.RequiredParams.Add(TEXT("comment"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("collapse_nodes_to_function");
+		Tool.Description = TEXT("Collapse selected nodes into a new function and insert a function call node.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Source graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeIdsParam = MakeShared<FJsonObject>();
+		NodeIdsParam->SetStringField(TEXT("type"), TEXT("array"));
+		NodeIdsParam->SetStringField(TEXT("description"), TEXT("Array of node ids to collapse."));
+		Tool.Parameters->SetObjectField(TEXT("node_ids"), NodeIdsParam);
+
+		TSharedPtr<FJsonObject> FunctionNameParam = MakeShared<FJsonObject>();
+		FunctionNameParam->SetStringField(TEXT("type"), TEXT("string"));
+		FunctionNameParam->SetStringField(TEXT("description"), TEXT("Optional target function name."));
+		Tool.Parameters->SetObjectField(TEXT("function_name"), FunctionNameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_ids"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("collapse_nodes_to_macro");
+		Tool.Description = TEXT("Collapse selected nodes into a new macro and insert a macro instance node.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Source graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeIdsParam = MakeShared<FJsonObject>();
+		NodeIdsParam->SetStringField(TEXT("type"), TEXT("array"));
+		NodeIdsParam->SetStringField(TEXT("description"), TEXT("Array of node ids to collapse."));
+		Tool.Parameters->SetObjectField(TEXT("node_ids"), NodeIdsParam);
+
+		TSharedPtr<FJsonObject> MacroNameParam = MakeShared<FJsonObject>();
+		MacroNameParam->SetStringField(TEXT("type"), TEXT("string"));
+		MacroNameParam->SetStringField(TEXT("description"), TEXT("Optional target macro name."));
+		Tool.Parameters->SetObjectField(TEXT("macro_name"), MacroNameParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_ids"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
 		Tool.Name = TEXT("set_pin_default_value");
 		Tool.Description = TEXT("Set a node pin default value string.");
 
@@ -3356,6 +3972,17 @@ FMCPResponse FBlueprintService::HandleRequest(const FMCPRequest& Request, const 
 	if (MethodName == TEXT("add_call_function_node")) return HandleAddCallFunctionNode(Request);
 	if (MethodName == TEXT("add_variable_get_node")) return HandleAddVariableGetNode(Request);
 	if (MethodName == TEXT("add_variable_set_node")) return HandleAddVariableSetNode(Request);
+	if (MethodName == TEXT("add_node_by_class")) return HandleAddNodeByClass(Request);
+	if (MethodName == TEXT("add_custom_event_node")) return HandleAddCustomEventNode(Request);
+	if (MethodName == TEXT("add_comment_node")) return HandleAddCommentNode(Request);
+	if (MethodName == TEXT("add_reroute_node")) return HandleAddRerouteNode(Request);
+	if (MethodName == TEXT("delete_node")) return HandleDeleteNode(Request);
+	if (MethodName == TEXT("duplicate_node")) return HandleDuplicateNode(Request);
+	if (MethodName == TEXT("move_node")) return HandleMoveNode(Request);
+	if (MethodName == TEXT("rename_node")) return HandleRenameNode(Request);
+	if (MethodName == TEXT("set_node_comment")) return HandleSetNodeComment(Request);
+	if (MethodName == TEXT("collapse_nodes_to_function")) return HandleCollapseNodesToFunction(Request);
+	if (MethodName == TEXT("collapse_nodes_to_macro")) return HandleCollapseNodesToMacro(Request);
 	if (MethodName == TEXT("set_pin_default_value")) return HandleSetPinDefaultValue(Request);
 	if (MethodName == TEXT("connect_pins")) return HandleConnectPins(Request);
 	if (MethodName == TEXT("compile_blueprint")) return HandleCompileBlueprint(Request);
@@ -8811,6 +9438,1063 @@ FMCPResponse FBlueprintService::HandleAddVariableSetNode(const FMCPRequest& Requ
 
 		Result->SetBoolField(TEXT("success"), true);
 		Result->SetObjectField(TEXT("node"), BuildNodeJson(SetNode));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleAddNodeByClass(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString NodeClassName;
+	FString GraphName = TEXT("EventGraph");
+	int32 NodeX = 0;
+	int32 NodeY = 0;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_class"), NodeClassName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_class'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+	Request.Params->TryGetNumberField(TEXT("x"), NodeX);
+	Request.Params->TryGetNumberField(TEXT("y"), NodeY);
+
+	auto Task = [BlueprintPath, NodeClassName, GraphName, NodeX, NodeY]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedClassName = NodeClassName.TrimStartAndEnd();
+		if (TrimmedClassName.IsEmpty())
+		{
+			return Fail(TEXT("node_class must be non-empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		UClass* NodeClass = ResolveClassByNameOrPath(TrimmedClassName);
+		if (!NodeClass)
+		{
+			return Fail(FString::Printf(TEXT("Node class not found: %s"), *TrimmedClassName));
+		}
+		if (!NodeClass->IsChildOf(UEdGraphNode::StaticClass()))
+		{
+			return Fail(FString::Printf(TEXT("Class is not a graph node type: %s"), *NodeClass->GetPathName()));
+		}
+		if (NodeClass->HasAnyClassFlags(CLASS_Abstract))
+		{
+			return Fail(FString::Printf(TEXT("Cannot instantiate abstract node class: %s"), *NodeClass->GetPathName()));
+		}
+
+		UEdGraphNode* SpawnedNode = SpawnNodeFromClass(Graph, NodeClass, NodeX, NodeY);
+		if (!SpawnedNode)
+		{
+			return Fail(FString::Printf(TEXT("Failed to spawn node class: %s"), *NodeClass->GetPathName()));
+		}
+
+		if (const UK2Node* K2Node = Cast<UK2Node>(SpawnedNode); K2Node && K2Node->NodeCausesStructuralBlueprintChange())
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+		else
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetObjectField(TEXT("node"), BuildNodeJson(SpawnedNode));
+		Result->SetStringField(TEXT("node_class"), NodeClass->GetPathName());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleAddCustomEventNode(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString EventName;
+	FString GraphName = TEXT("EventGraph");
+	int32 NodeX = 0;
+	int32 NodeY = 0;
+	bool bCallInEditor = false;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("event_name"), EventName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'event_name'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+	Request.Params->TryGetNumberField(TEXT("x"), NodeX);
+	Request.Params->TryGetNumberField(TEXT("y"), NodeY);
+	Request.Params->TryGetBoolField(TEXT("call_in_editor"), bCallInEditor);
+
+	auto Task = [BlueprintPath, EventName, GraphName, NodeX, NodeY, bCallInEditor]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedEventName = EventName.TrimStartAndEnd();
+		if (TrimmedEventName.IsEmpty())
+		{
+			return Fail(TEXT("event_name must be non-empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		FGraphNodeCreator<UK2Node_CustomEvent> EventCreator(*Graph);
+		UK2Node_CustomEvent* EventNode = EventCreator.CreateNode();
+		if (!EventNode)
+		{
+			return Fail(TEXT("Failed to create custom event node"));
+		}
+
+		EventNode->NodePosX = NodeX;
+		EventNode->NodePosY = NodeY;
+		EventCreator.Finalize();
+		EventNode->OnRenameNode(TrimmedEventName);
+		EventNode->bCallInEditor = bCallInEditor;
+		EventNode->ReconstructNode();
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetObjectField(TEXT("node"), BuildNodeJson(EventNode));
+		Result->SetStringField(TEXT("event_name"), EventNode->CustomFunctionName.ToString());
+		Result->SetBoolField(TEXT("call_in_editor"), EventNode->bCallInEditor);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleAddCommentNode(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString CommentText = TEXT("Comment");
+	int32 NodeX = 0;
+	int32 NodeY = 0;
+	int32 NodeWidth = 400;
+	int32 NodeHeight = 200;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+	Request.Params->TryGetStringField(TEXT("comment"), CommentText);
+	Request.Params->TryGetNumberField(TEXT("x"), NodeX);
+	Request.Params->TryGetNumberField(TEXT("y"), NodeY);
+	Request.Params->TryGetNumberField(TEXT("width"), NodeWidth);
+	Request.Params->TryGetNumberField(TEXT("height"), NodeHeight);
+
+	auto Task = [BlueprintPath, GraphName, CommentText, NodeX, NodeY, NodeWidth, NodeHeight]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		FGraphNodeCreator<UEdGraphNode_Comment> CommentCreator(*Graph);
+		UEdGraphNode_Comment* CommentNode = CommentCreator.CreateNode();
+		if (!CommentNode)
+		{
+			return Fail(TEXT("Failed to create comment node"));
+		}
+
+		CommentNode->NodePosX = NodeX;
+		CommentNode->NodePosY = NodeY;
+		CommentNode->NodeWidth = FMath::Max(NodeWidth, 64);
+		CommentNode->NodeHeight = FMath::Max(NodeHeight, 64);
+		CommentNode->NodeComment = CommentText;
+		CommentCreator.Finalize();
+
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetObjectField(TEXT("node"), BuildNodeJson(CommentNode));
+		Result->SetStringField(TEXT("comment"), CommentNode->NodeComment);
+		Result->SetNumberField(TEXT("width"), CommentNode->NodeWidth);
+		Result->SetNumberField(TEXT("height"), CommentNode->NodeHeight);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleAddRerouteNode(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	int32 NodeX = 0;
+	int32 NodeY = 0;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+	Request.Params->TryGetNumberField(TEXT("x"), NodeX);
+	Request.Params->TryGetNumberField(TEXT("y"), NodeY);
+
+	auto Task = [BlueprintPath, GraphName, NodeX, NodeY]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		FGraphNodeCreator<UK2Node_Knot> KnotCreator(*Graph);
+		UK2Node_Knot* KnotNode = KnotCreator.CreateNode();
+		if (!KnotNode)
+		{
+			return Fail(TEXT("Failed to create reroute node"));
+		}
+
+		KnotNode->NodePosX = NodeX;
+		KnotNode->NodePosY = NodeY;
+		KnotCreator.Finalize();
+		KnotNode->ReconstructNode();
+
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetObjectField(TEXT("node"), BuildNodeJson(KnotNode));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleDeleteNode(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString NodeId;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, GraphName, NodeId]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId);
+		if (!Node)
+		{
+			return Fail(FString::Printf(TEXT("Node not found for node_id: %s"), *NodeId));
+		}
+		if (!Node->CanUserDeleteNode())
+		{
+			return Fail(FString::Printf(TEXT("Node cannot be deleted: %s"), *Node->GetNodeTitle(ENodeTitleType::ListView).ToString()));
+		}
+
+		const bool bStructural = (Cast<UK2Node>(Node) != nullptr) && Cast<UK2Node>(Node)->NodeCausesStructuralBlueprintChange();
+		Node->Modify();
+		Node->DestroyNode();
+
+		if (bStructural)
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+		else
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("deleted_node_id"), NodeId);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleDuplicateNode(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	TArray<FString> NodeIds;
+	FString NodeIdsError;
+	int32 OffsetX = 40;
+	int32 OffsetY = 40;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!ExtractStringArrayField(Request.Params, TEXT("node_ids"), NodeIds, NodeIdsError))
+	{
+		return InvalidParams(Request.Id, NodeIdsError);
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+	Request.Params->TryGetNumberField(TEXT("offset_x"), OffsetX);
+	Request.Params->TryGetNumberField(TEXT("offset_y"), OffsetY);
+
+	auto Task = [BlueprintPath, GraphName, NodeIds, OffsetX, OffsetY]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		TArray<UEdGraphNode*> SourceNodes;
+		FString ResolveError;
+		if (!FindNodesByIds(Graph, NodeIds, SourceNodes, ResolveError))
+		{
+			return Fail(ResolveError);
+		}
+
+		TSet<UObject*> NodesToExport;
+		for (UEdGraphNode* SourceNode : SourceNodes)
+		{
+			if (SourceNode)
+			{
+				NodesToExport.Add(SourceNode);
+			}
+		}
+		if (NodesToExport.Num() == 0)
+		{
+			return Fail(TEXT("No nodes resolved for duplication"));
+		}
+
+		FString ExportedText;
+		FEdGraphUtilities::ExportNodesToText(NodesToExport, ExportedText);
+		if (ExportedText.IsEmpty())
+		{
+			return Fail(TEXT("Failed to export selected nodes"));
+		}
+		if (!FEdGraphUtilities::CanImportNodesFromText(Graph, ExportedText))
+		{
+			return Fail(TEXT("Selected nodes cannot be duplicated into target graph"));
+		}
+
+		TSet<UEdGraphNode*> ImportedSet;
+		FEdGraphUtilities::ImportNodesFromText(Graph, ExportedText, ImportedSet);
+		if (ImportedSet.Num() == 0)
+		{
+			return Fail(TEXT("Node duplication import produced no nodes"));
+		}
+
+		TArray<UEdGraphNode*> ImportedNodes;
+		ImportedNodes.Reserve(ImportedSet.Num());
+		bool bStructural = false;
+		for (UEdGraphNode* ImportedNode : ImportedSet)
+		{
+			if (!ImportedNode)
+			{
+				continue;
+			}
+
+			ImportedNode->Modify();
+			ImportedNode->NodePosX += OffsetX;
+			ImportedNode->NodePosY += OffsetY;
+			if (const UK2Node* ImportedK2Node = Cast<UK2Node>(ImportedNode); ImportedK2Node && ImportedK2Node->NodeCausesStructuralBlueprintChange())
+			{
+				bStructural = true;
+			}
+			ImportedNodes.Add(ImportedNode);
+		}
+		ImportedNodes.Sort([](const UEdGraphNode& A, const UEdGraphNode& B)
+		{
+			if (A.NodePosY == B.NodePosY)
+			{
+				return A.NodePosX < B.NodePosX;
+			}
+			return A.NodePosY < B.NodePosY;
+		});
+
+		if (bStructural)
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+		else
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetArrayField(TEXT("nodes"), BuildNodesJsonArray(ImportedNodes));
+		Result->SetNumberField(TEXT("count"), ImportedNodes.Num());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleMoveNode(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString NodeId;
+	double XValue = 0.0;
+	double YValue = 0.0;
+	double DeltaXValue = 0.0;
+	double DeltaYValue = 0.0;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	const bool bHasX = Request.Params->TryGetNumberField(TEXT("x"), XValue);
+	const bool bHasY = Request.Params->TryGetNumberField(TEXT("y"), YValue);
+	const bool bHasDeltaX = Request.Params->TryGetNumberField(TEXT("delta_x"), DeltaXValue);
+	const bool bHasDeltaY = Request.Params->TryGetNumberField(TEXT("delta_y"), DeltaYValue);
+	if (!bHasX && !bHasY && !bHasDeltaX && !bHasDeltaY)
+	{
+		return InvalidParams(Request.Id, TEXT("Provide at least one of: x, y, delta_x, delta_y"));
+	}
+
+	auto Task = [BlueprintPath, GraphName, NodeId, bHasX, bHasY, bHasDeltaX, bHasDeltaY, XValue, YValue, DeltaXValue, DeltaYValue]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId);
+		if (!Node)
+		{
+			return Fail(FString::Printf(TEXT("Node not found for node_id: %s"), *NodeId));
+		}
+
+		int32 NewX = Node->NodePosX;
+		int32 NewY = Node->NodePosY;
+		if (bHasX)
+		{
+			NewX = FMath::RoundToInt(XValue);
+		}
+		if (bHasY)
+		{
+			NewY = FMath::RoundToInt(YValue);
+		}
+		if (bHasDeltaX)
+		{
+			NewX += FMath::RoundToInt(DeltaXValue);
+		}
+		if (bHasDeltaY)
+		{
+			NewY += FMath::RoundToInt(DeltaYValue);
+		}
+
+		Node->Modify();
+		Node->NodePosX = NewX;
+		Node->NodePosY = NewY;
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetObjectField(TEXT("node"), BuildNodeJson(Node));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleRenameNode(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString NodeId;
+	FString NewName;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("new_name"), NewName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'new_name'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, GraphName, NodeId, NewName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedName = NewName.TrimStartAndEnd();
+		if (TrimmedName.IsEmpty())
+		{
+			return Fail(TEXT("new_name must be non-empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId);
+		if (!Node)
+		{
+			return Fail(FString::Printf(TEXT("Node not found for node_id: %s"), *NodeId));
+		}
+		if (!Node->GetCanRenameNode())
+		{
+			return Fail(FString::Printf(TEXT("Node does not support rename: %s"), *Node->GetClass()->GetName()));
+		}
+
+		Node->Modify();
+		Node->OnRenameNode(TrimmedName);
+
+		if (const UK2Node* K2Node = Cast<UK2Node>(Node); K2Node && K2Node->NodeCausesStructuralBlueprintChange())
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+		else
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetObjectField(TEXT("node"), BuildNodeJson(Node));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleSetNodeComment(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString NodeId;
+	FString CommentText;
+	bool bBubbleVisible = false;
+	const bool bHasBubbleVisible = Request.Params->TryGetBoolField(TEXT("bubble_visible"), bBubbleVisible);
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("comment"), CommentText))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'comment'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, GraphName, NodeId, CommentText, bHasBubbleVisible, bBubbleVisible]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId);
+		if (!Node)
+		{
+			return Fail(FString::Printf(TEXT("Node not found for node_id: %s"), *NodeId));
+		}
+
+		Node->Modify();
+		Node->NodeComment = CommentText;
+		if (bHasBubbleVisible)
+		{
+			Node->bCommentBubbleVisible = bBubbleVisible;
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetObjectField(TEXT("node"), BuildNodeJson(Node));
+		Result->SetStringField(TEXT("comment"), Node->NodeComment);
+		Result->SetBoolField(TEXT("bubble_visible"), Node->bCommentBubbleVisible);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleCollapseNodesToFunction(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString FunctionName;
+	TArray<FString> NodeIds;
+	FString NodeIdsError;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!ExtractStringArrayField(Request.Params, TEXT("node_ids"), NodeIds, NodeIdsError))
+	{
+		return InvalidParams(Request.Id, NodeIdsError);
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+	Request.Params->TryGetStringField(TEXT("function_name"), FunctionName);
+
+	auto Task = [BlueprintPath, GraphName, FunctionName, NodeIds]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* SourceGraph = ResolveGraph(Blueprint, GraphName);
+		if (!SourceGraph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		TArray<UEdGraphNode*> SourceNodes;
+		FString ResolveError;
+		if (!FindNodesByIds(SourceGraph, NodeIds, SourceNodes, ResolveError))
+		{
+			return Fail(ResolveError);
+		}
+		for (UEdGraphNode* SourceNode : SourceNodes)
+		{
+			if (SourceNode && !SourceNode->CanUserDeleteNode())
+			{
+				return Fail(FString::Printf(TEXT("Cannot collapse node that cannot be deleted: %s"), *SourceNode->GetNodeTitle(ENodeTitleType::ListView).ToString()));
+			}
+		}
+
+		FString TargetFunctionName = FunctionName.TrimStartAndEnd();
+		if (TargetFunctionName.IsEmpty())
+		{
+			TargetFunctionName = FBlueprintEditorUtils::FindUniqueKismetName(Blueprint, TEXT("CollapsedFunction")).ToString();
+		}
+		else if (ResolveGraph(Blueprint, TargetFunctionName))
+		{
+			return Fail(FString::Printf(TEXT("A graph already exists with name: %s"), *TargetFunctionName));
+		}
+
+		UEdGraph* FunctionGraph = UBlueprintEditorLibrary::AddFunctionGraph(Blueprint, TargetFunctionName);
+		if (!FunctionGraph)
+		{
+			return Fail(FString::Printf(TEXT("Failed to create function graph: %s"), *TargetFunctionName));
+		}
+
+		TSet<UObject*> NodesToExport;
+		for (UEdGraphNode* SourceNode : SourceNodes)
+		{
+			if (SourceNode)
+			{
+				NodesToExport.Add(SourceNode);
+			}
+		}
+
+		FString ExportedText;
+		FEdGraphUtilities::ExportNodesToText(NodesToExport, ExportedText);
+		if (ExportedText.IsEmpty())
+		{
+			FBlueprintEditorUtils::RemoveGraph(Blueprint, FunctionGraph, EGraphRemoveFlags::Default);
+			return Fail(TEXT("Failed to export selected nodes"));
+		}
+		if (!FEdGraphUtilities::CanImportNodesFromText(FunctionGraph, ExportedText))
+		{
+			FBlueprintEditorUtils::RemoveGraph(Blueprint, FunctionGraph, EGraphRemoveFlags::Default);
+			return Fail(TEXT("Selected nodes cannot be collapsed to a function graph"));
+		}
+
+		TSet<UEdGraphNode*> ImportedSet;
+		FEdGraphUtilities::ImportNodesFromText(FunctionGraph, ExportedText, ImportedSet);
+		if (ImportedSet.Num() == 0)
+		{
+			FBlueprintEditorUtils::RemoveGraph(Blueprint, FunctionGraph, EGraphRemoveFlags::Default);
+			return Fail(TEXT("Collapse import produced no nodes in function graph"));
+		}
+
+		const FVector2D SourceLocation = ComputeAverageNodeLocation(SourceNodes);
+		for (UEdGraphNode* SourceNode : SourceNodes)
+		{
+			if (!SourceNode)
+			{
+				continue;
+			}
+			SourceNode->Modify();
+			SourceNode->DestroyNode();
+		}
+
+		UK2Node_CallFunction* FunctionCallNode = SpawnSelfCallFunctionNode(SourceGraph, Blueprint, FName(*FunctionGraph->GetName()), SourceLocation);
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetObjectField(TEXT("function"), BuildFunctionJson(Blueprint, FunctionGraph));
+		Result->SetArrayField(TEXT("moved_nodes"), BuildNodesJsonArray(ImportedSet.Array()));
+		Result->SetBoolField(TEXT("created_call_node"), FunctionCallNode != nullptr);
+		if (FunctionCallNode)
+		{
+			Result->SetObjectField(TEXT("call_node"), BuildNodeJson(FunctionCallNode));
+		}
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleCollapseNodesToMacro(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString MacroName;
+	TArray<FString> NodeIds;
+	FString NodeIdsError;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!ExtractStringArrayField(Request.Params, TEXT("node_ids"), NodeIds, NodeIdsError))
+	{
+		return InvalidParams(Request.Id, NodeIdsError);
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+	Request.Params->TryGetStringField(TEXT("macro_name"), MacroName);
+
+	auto Task = [BlueprintPath, GraphName, MacroName, NodeIds]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* SourceGraph = ResolveGraph(Blueprint, GraphName);
+		if (!SourceGraph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		TArray<UEdGraphNode*> SourceNodes;
+		FString ResolveError;
+		if (!FindNodesByIds(SourceGraph, NodeIds, SourceNodes, ResolveError))
+		{
+			return Fail(ResolveError);
+		}
+		for (UEdGraphNode* SourceNode : SourceNodes)
+		{
+			if (SourceNode && !SourceNode->CanUserDeleteNode())
+			{
+				return Fail(FString::Printf(TEXT("Cannot collapse node that cannot be deleted: %s"), *SourceNode->GetNodeTitle(ENodeTitleType::ListView).ToString()));
+			}
+		}
+
+		FString TargetMacroName = MacroName.TrimStartAndEnd();
+		if (TargetMacroName.IsEmpty())
+		{
+			TargetMacroName = FBlueprintEditorUtils::FindUniqueKismetName(Blueprint, TEXT("CollapsedMacro")).ToString();
+		}
+		else if (ResolveGraph(Blueprint, TargetMacroName))
+		{
+			return Fail(FString::Printf(TEXT("A graph already exists with name: %s"), *TargetMacroName));
+		}
+
+		UEdGraph* MacroGraph = FBlueprintEditorUtils::CreateNewGraph(
+			Blueprint,
+			FName(*TargetMacroName),
+			UEdGraph::StaticClass(),
+			UEdGraphSchema_K2::StaticClass()
+		);
+		if (!MacroGraph)
+		{
+			return Fail(FString::Printf(TEXT("Failed to create macro graph: %s"), *TargetMacroName));
+		}
+		FBlueprintEditorUtils::AddMacroGraph(Blueprint, MacroGraph, true, nullptr);
+
+		TSet<UObject*> NodesToExport;
+		for (UEdGraphNode* SourceNode : SourceNodes)
+		{
+			if (SourceNode)
+			{
+				NodesToExport.Add(SourceNode);
+			}
+		}
+
+		FString ExportedText;
+		FEdGraphUtilities::ExportNodesToText(NodesToExport, ExportedText);
+		if (ExportedText.IsEmpty())
+		{
+			FBlueprintEditorUtils::RemoveGraph(Blueprint, MacroGraph, EGraphRemoveFlags::Default);
+			return Fail(TEXT("Failed to export selected nodes"));
+		}
+		if (!FEdGraphUtilities::CanImportNodesFromText(MacroGraph, ExportedText))
+		{
+			FBlueprintEditorUtils::RemoveGraph(Blueprint, MacroGraph, EGraphRemoveFlags::Default);
+			return Fail(TEXT("Selected nodes cannot be collapsed to a macro graph"));
+		}
+
+		TSet<UEdGraphNode*> ImportedSet;
+		FEdGraphUtilities::ImportNodesFromText(MacroGraph, ExportedText, ImportedSet);
+		if (ImportedSet.Num() == 0)
+		{
+			FBlueprintEditorUtils::RemoveGraph(Blueprint, MacroGraph, EGraphRemoveFlags::Default);
+			return Fail(TEXT("Collapse import produced no nodes in macro graph"));
+		}
+
+		const FVector2D SourceLocation = ComputeAverageNodeLocation(SourceNodes);
+		for (UEdGraphNode* SourceNode : SourceNodes)
+		{
+			if (!SourceNode)
+			{
+				continue;
+			}
+			SourceNode->Modify();
+			SourceNode->DestroyNode();
+		}
+
+		UK2Node_MacroInstance* MacroNode = SpawnMacroInstanceNode(SourceGraph, MacroGraph, SourceLocation);
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		TSharedPtr<FJsonObject> MacroObj = BuildGraphJson(Blueprint, MacroGraph);
+		MacroObj->SetStringField(TEXT("macro_name"), MacroGraph->GetName());
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetObjectField(TEXT("macro"), MacroObj);
+		Result->SetArrayField(TEXT("moved_nodes"), BuildNodesJsonArray(ImportedSet.Array()));
+		Result->SetBoolField(TEXT("created_macro_node"), MacroNode != nullptr);
+		if (MacroNode)
+		{
+			Result->SetObjectField(TEXT("macro_node"), BuildNodeJson(MacroNode));
+		}
 		return Result;
 	};
 

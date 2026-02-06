@@ -82,6 +82,17 @@ private:
 	FMCPResponse HandleAddCallFunctionNode(const FMCPRequest& Request);
 	FMCPResponse HandleAddVariableGetNode(const FMCPRequest& Request);
 	FMCPResponse HandleAddVariableSetNode(const FMCPRequest& Request);
+	FMCPResponse HandleAddNodeByClass(const FMCPRequest& Request);
+	FMCPResponse HandleAddCustomEventNode(const FMCPRequest& Request);
+	FMCPResponse HandleAddCommentNode(const FMCPRequest& Request);
+	FMCPResponse HandleAddRerouteNode(const FMCPRequest& Request);
+	FMCPResponse HandleDeleteNode(const FMCPRequest& Request);
+	FMCPResponse HandleDuplicateNode(const FMCPRequest& Request);
+	FMCPResponse HandleMoveNode(const FMCPRequest& Request);
+	FMCPResponse HandleRenameNode(const FMCPRequest& Request);
+	FMCPResponse HandleSetNodeComment(const FMCPRequest& Request);
+	FMCPResponse HandleCollapseNodesToFunction(const FMCPRequest& Request);
+	FMCPResponse HandleCollapseNodesToMacro(const FMCPRequest& Request);
 	FMCPResponse HandleSetPinDefaultValue(const FMCPRequest& Request);
 	FMCPResponse HandleConnectPins(const FMCPRequest& Request);
 	FMCPResponse HandleCompileBlueprint(const FMCPRequest& Request);
