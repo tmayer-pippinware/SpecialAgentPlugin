@@ -76,6 +76,17 @@ Native Blueprint graph tools for node-based authoring workflows:
 - `blueprint/delete_graph`
 - `blueprint/set_graph_metadata`
 - `blueprint/format_graph`
+- `blueprint/list_variables`
+- `blueprint/rename_variable`
+- `blueprint/delete_variable`
+- `blueprint/set_variable_default`
+- `blueprint/set_variable_metadata`
+- `blueprint/set_variable_instance_editable`
+- `blueprint/set_variable_expose_on_spawn`
+- `blueprint/set_variable_savegame`
+- `blueprint/set_variable_transient`
+- `blueprint/set_variable_replication`
+- `blueprint/add_variable_set_node`
 
 ### Visual Feedback Loop
 
@@ -161,7 +172,7 @@ Your AI assistant now has access to:
 | Service | Methods | Description |
 |---------|:-------:|-------------|
 | **Python** | 3 | Execute scripts, run files, list modules |
-| **Blueprint** | 22 | Blueprint asset lifecycle, graph management, node authoring, and compile support |
+| **Blueprint** | 33 | Blueprint asset lifecycle, graph management, variable authoring, node authoring, and compile support |
 | **Screenshot** | 2 | Capture viewport for AI vision |
 | **World** | 30+ | Actor manipulation and spatial queries |
 | **Assets** | 4 | Content Browser search and inspection |
