@@ -68,5 +68,15 @@ private:
 	FMCPResponse HandleMaterialInstanceSetStaticSwitch(const FMCPRequest& Request);
 	FMCPResponse HandleMaterialInstanceSetStaticComponentMask(const FMCPRequest& Request);
 	FMCPResponse HandleMaterialInstanceCopyOverridesFromInstance(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialFunctionGetInfo(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialFunctionListInputs(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialFunctionListOutputs(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialFunctionCreateInput(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialFunctionCreateOutput(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialFunctionRemoveInput(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialFunctionRemoveOutput(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialFunctionAddCallNode(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialFunctionSetIOTypes(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialFunctionCompile(const FMCPRequest& Request);
 	FMCPResponse HandleCapabilities(const FMCPRequest& Request);
 };

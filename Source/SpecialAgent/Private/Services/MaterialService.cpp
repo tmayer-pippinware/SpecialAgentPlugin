@@ -15,6 +15,9 @@
 #include "Materials/MaterialExpressionParameter.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpressionComment.h"
+#include "Materials/MaterialExpressionFunctionInput.h"
+#include "Materials/MaterialExpressionFunctionOutput.h"
+#include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialExpressionReroute.h"
 #include "Materials/MaterialExpressionRuntimeVirtualTextureSampleParameter.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
@@ -2060,6 +2063,388 @@ namespace
 		return false;
 	}
 
+	static UMaterialFunction* ResolveMaterialFunctionAsset(const FString& InputPath, FString& OutAssetPath, FString& OutError)
+	{
+		OutAssetPath = NormalizeAssetPath(InputPath);
+		if (!FPackageName::IsValidLongPackageName(OutAssetPath))
+		{
+			OutError = FString::Printf(TEXT("Invalid material function path: %s"), *InputPath);
+			return nullptr;
+		}
+
+		UMaterialFunction* Function = LoadAssetAs<UMaterialFunction>(OutAssetPath);
+		if (!Function)
+		{
+			OutError = FString::Printf(TEXT("Material function not found: %s"), *OutAssetPath);
+			return nullptr;
+		}
+
+		return Function;
+	}
+
+	static void GatherMaterialFunctionIONodes(
+		UMaterialFunction* Function,
+		TArray<UMaterialExpressionFunctionInput*>& OutInputs,
+		TArray<UMaterialExpressionFunctionOutput*>& OutOutputs)
+	{
+		OutInputs.Reset();
+		OutOutputs.Reset();
+		if (!Function)
+		{
+			return;
+		}
+
+		for (UMaterialExpression* Expression : Function->GetExpressions())
+		{
+			if (UMaterialExpressionFunctionInput* FunctionInput = Cast<UMaterialExpressionFunctionInput>(Expression))
+			{
+				OutInputs.Add(FunctionInput);
+				continue;
+			}
+			if (UMaterialExpressionFunctionOutput* FunctionOutput = Cast<UMaterialExpressionFunctionOutput>(Expression))
+			{
+				OutOutputs.Add(FunctionOutput);
+			}
+		}
+	}
+
+	static FString FunctionInputTypeToString(const EFunctionInputType InputType)
+	{
+		switch (InputType)
+		{
+		case FunctionInput_Scalar:
+			return TEXT("scalar");
+		case FunctionInput_Vector2:
+			return TEXT("vector2");
+		case FunctionInput_Vector3:
+			return TEXT("vector3");
+		case FunctionInput_Vector4:
+			return TEXT("vector4");
+		case FunctionInput_Texture2D:
+			return TEXT("texture2d");
+		case FunctionInput_TextureCube:
+			return TEXT("texturecube");
+		case FunctionInput_Texture2DArray:
+			return TEXT("texture2darray");
+		case FunctionInput_VolumeTexture:
+			return TEXT("volumetexture");
+		case FunctionInput_StaticBool:
+			return TEXT("staticbool");
+		case FunctionInput_MaterialAttributes:
+			return TEXT("materialattributes");
+		case FunctionInput_TextureExternal:
+			return TEXT("textureexternal");
+		case FunctionInput_Bool:
+			return TEXT("bool");
+		case FunctionInput_Substrate:
+			return TEXT("substrate");
+		default:
+			return TEXT("unknown");
+		}
+	}
+
+	static FString MaterialValueTypeToString(const EMaterialValueType ValueType)
+	{
+		switch (ValueType)
+		{
+		case MCT_Float:
+		case MCT_Float1:
+			return TEXT("float");
+		case MCT_Float2:
+			return TEXT("float2");
+		case MCT_Float3:
+			return TEXT("float3");
+		case MCT_Float4:
+			return TEXT("float4");
+		case MCT_Texture:
+		case MCT_Texture2D:
+			return TEXT("texture2d");
+		case MCT_TextureCube:
+			return TEXT("texturecube");
+		case MCT_Texture2DArray:
+			return TEXT("texture2darray");
+		case MCT_TextureExternal:
+			return TEXT("textureexternal");
+		case MCT_VolumeTexture:
+			return TEXT("volumetexture");
+		case MCT_StaticBool:
+			return TEXT("staticbool");
+		case MCT_Bool:
+			return TEXT("bool");
+		case MCT_MaterialAttributes:
+			return TEXT("materialattributes");
+		case MCT_Substrate:
+			return TEXT("substrate");
+		default:
+			break;
+		}
+
+		return FString::Printf(TEXT("value_%d"), static_cast<int32>(ValueType));
+	}
+
+	static bool ParseFunctionInputTypeToken(const FString& Input, EFunctionInputType& OutType, FString& OutError)
+	{
+		const FString Token = NormalizeParameterToken(Input);
+		if (Token.IsEmpty())
+		{
+			OutError = TEXT("Missing function input type");
+			return false;
+		}
+
+		if (Token == TEXT("scalar") || Token == TEXT("float") || Token == TEXT("float1"))
+		{
+			OutType = FunctionInput_Scalar;
+			return true;
+		}
+		if (Token == TEXT("vector2") || Token == TEXT("float2"))
+		{
+			OutType = FunctionInput_Vector2;
+			return true;
+		}
+		if (Token == TEXT("vector3") || Token == TEXT("float3") || Token == TEXT("vector"))
+		{
+			OutType = FunctionInput_Vector3;
+			return true;
+		}
+		if (Token == TEXT("vector4") || Token == TEXT("float4") || Token == TEXT("color"))
+		{
+			OutType = FunctionInput_Vector4;
+			return true;
+		}
+		if (Token == TEXT("texture") || Token == TEXT("texture2d"))
+		{
+			OutType = FunctionInput_Texture2D;
+			return true;
+		}
+		if (Token == TEXT("texturecube") || Token == TEXT("cube"))
+		{
+			OutType = FunctionInput_TextureCube;
+			return true;
+		}
+		if (Token == TEXT("texture2darray"))
+		{
+			OutType = FunctionInput_Texture2DArray;
+			return true;
+		}
+		if (Token == TEXT("volumetexture"))
+		{
+			OutType = FunctionInput_VolumeTexture;
+			return true;
+		}
+		if (Token == TEXT("staticbool") || Token == TEXT("static_switch"))
+		{
+			OutType = FunctionInput_StaticBool;
+			return true;
+		}
+		if (Token == TEXT("materialattributes") || Token == TEXT("material_attributes"))
+		{
+			OutType = FunctionInput_MaterialAttributes;
+			return true;
+		}
+		if (Token == TEXT("textureexternal"))
+		{
+			OutType = FunctionInput_TextureExternal;
+			return true;
+		}
+		if (Token == TEXT("bool"))
+		{
+			OutType = FunctionInput_Bool;
+			return true;
+		}
+		if (Token == TEXT("substrate"))
+		{
+			OutType = FunctionInput_Substrate;
+			return true;
+		}
+
+		const UEnum* Enum = StaticEnum<EFunctionInputType>();
+		if (Enum)
+		{
+			FString EnumToken = Token;
+			if (!EnumToken.StartsWith(TEXT("functioninput_")))
+			{
+				EnumToken = FString::Printf(TEXT("FunctionInput_%s"), *Token);
+			}
+			const int64 Value = Enum->GetValueByName(FName(*EnumToken));
+			if (Value != INDEX_NONE)
+			{
+				OutType = static_cast<EFunctionInputType>(Value);
+				return true;
+			}
+		}
+
+		OutError = FString::Printf(TEXT("Unsupported function input type '%s'"), *Input);
+		return false;
+	}
+
+	static TSharedPtr<FJsonObject> BuildMaterialFunctionInputJson(const UMaterialExpressionFunctionInput* InputExpression)
+	{
+		TSharedPtr<FJsonObject> InputObject = BuildNodeJson(InputExpression);
+		if (!InputExpression || !InputObject.IsValid())
+		{
+			return InputObject;
+		}
+
+		InputObject->SetStringField(TEXT("input_name"), InputExpression->InputName.ToString());
+		InputObject->SetStringField(TEXT("description"), InputExpression->Description);
+		InputObject->SetNumberField(TEXT("sort_priority"), InputExpression->SortPriority);
+		InputObject->SetStringField(TEXT("input_type"), FunctionInputTypeToString(InputExpression->InputType));
+		InputObject->SetStringField(TEXT("input_type_display_name"), UMaterialExpressionFunctionInput::GetInputTypeDisplayName(InputExpression->InputType));
+		InputObject->SetStringField(TEXT("material_value_type"), MaterialValueTypeToString(UMaterialExpressionFunctionInput::GetMaterialTypeFromInputType(InputExpression->InputType)));
+		InputObject->SetBoolField(TEXT("use_preview_value_as_default"), InputExpression->bUsePreviewValueAsDefault != 0);
+		InputObject->SetStringField(TEXT("id"), InputExpression->Id.IsValid() ? InputExpression->Id.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+		InputObject->SetObjectField(TEXT("preview_value"), BuildColorJson(FLinearColor(
+			static_cast<float>(InputExpression->PreviewValue.X),
+			static_cast<float>(InputExpression->PreviewValue.Y),
+			static_cast<float>(InputExpression->PreviewValue.Z),
+			static_cast<float>(InputExpression->PreviewValue.W))));
+
+		const bool bHasPreviewConnection = InputExpression->Preview.Expression != nullptr;
+		InputObject->SetBoolField(TEXT("has_preview_connection"), bHasPreviewConnection);
+		if (bHasPreviewConnection)
+		{
+			InputObject->SetStringField(TEXT("preview_node_id"), GetNodeId(InputExpression->Preview.Expression));
+			InputObject->SetNumberField(TEXT("preview_output_index"), InputExpression->Preview.OutputIndex);
+		}
+		return InputObject;
+	}
+
+	static TSharedPtr<FJsonObject> BuildMaterialFunctionOutputJson(UMaterialExpressionFunctionOutput* OutputExpression)
+	{
+		TSharedPtr<FJsonObject> OutputObject = BuildNodeJson(OutputExpression);
+		if (!OutputExpression || !OutputObject.IsValid())
+		{
+			return OutputObject;
+		}
+
+		OutputObject->SetStringField(TEXT("output_name"), OutputExpression->OutputName.ToString());
+		OutputObject->SetStringField(TEXT("description"), OutputExpression->Description);
+		OutputObject->SetNumberField(TEXT("sort_priority"), OutputExpression->SortPriority);
+		OutputObject->SetStringField(TEXT("id"), OutputExpression->Id.IsValid() ? OutputExpression->Id.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+		OutputObject->SetStringField(TEXT("inferred_value_type"), MaterialValueTypeToString(OutputExpression->GetOutputValueType(0)));
+
+		const bool bConnected = OutputExpression->A.Expression != nullptr;
+		OutputObject->SetBoolField(TEXT("is_connected"), bConnected);
+		if (bConnected)
+		{
+			OutputObject->SetStringField(TEXT("linked_node_id"), GetNodeId(OutputExpression->A.Expression));
+			OutputObject->SetStringField(TEXT("linked_node_name"), OutputExpression->A.Expression->GetName());
+			OutputObject->SetNumberField(TEXT("linked_output_index"), OutputExpression->A.OutputIndex);
+			OutputObject->SetStringField(TEXT("linked_output_name"), GetOutputPinDisplayName(OutputExpression->A.Expression, OutputExpression->A.OutputIndex, OutputExpression->A.Expression->GetOutput(OutputExpression->A.OutputIndex)));
+		}
+		return OutputObject;
+	}
+
+	static UMaterialExpressionFunctionInput* ResolveMaterialFunctionInputNode(
+		UMaterialFunction* Function,
+		const FString& NodeId,
+		const FString& InputName,
+		FString& OutError)
+	{
+		if (!Function)
+		{
+			OutError = TEXT("Material function is null");
+			return nullptr;
+		}
+
+		const FString TrimmedNodeId = NodeId.TrimStartAndEnd();
+		const FString TrimmedInputName = InputName.TrimStartAndEnd();
+
+		if (!TrimmedNodeId.IsEmpty())
+		{
+			FMaterialGraphContext Context;
+			Context.MaterialFunction = Function;
+			Context.AssetPath = NormalizeAssetPath(Function->GetPathName());
+			UMaterialExpression* Node = FindNodeById(Context, TrimmedNodeId);
+			if (!Node)
+			{
+				OutError = FString::Printf(TEXT("Node not found: %s"), *TrimmedNodeId);
+				return nullptr;
+			}
+			if (UMaterialExpressionFunctionInput* FunctionInput = Cast<UMaterialExpressionFunctionInput>(Node))
+			{
+				return FunctionInput;
+			}
+			OutError = FString::Printf(TEXT("Node '%s' is not a material function input"), *TrimmedNodeId);
+			return nullptr;
+		}
+
+		if (TrimmedInputName.IsEmpty())
+		{
+			OutError = TEXT("Provide either 'node_id' or 'input_name'");
+			return nullptr;
+		}
+
+		TArray<UMaterialExpressionFunctionInput*> Inputs;
+		TArray<UMaterialExpressionFunctionOutput*> Outputs;
+		GatherMaterialFunctionIONodes(Function, Inputs, Outputs);
+		for (UMaterialExpressionFunctionInput* InputExpression : Inputs)
+		{
+			if (InputExpression && InputExpression->InputName.ToString().Equals(TrimmedInputName, ESearchCase::IgnoreCase))
+			{
+				return InputExpression;
+			}
+		}
+
+		OutError = FString::Printf(TEXT("Function input not found: %s"), *TrimmedInputName);
+		return nullptr;
+	}
+
+	static UMaterialExpressionFunctionOutput* ResolveMaterialFunctionOutputNode(
+		UMaterialFunction* Function,
+		const FString& NodeId,
+		const FString& OutputName,
+		FString& OutError)
+	{
+		if (!Function)
+		{
+			OutError = TEXT("Material function is null");
+			return nullptr;
+		}
+
+		const FString TrimmedNodeId = NodeId.TrimStartAndEnd();
+		const FString TrimmedOutputName = OutputName.TrimStartAndEnd();
+
+		if (!TrimmedNodeId.IsEmpty())
+		{
+			FMaterialGraphContext Context;
+			Context.MaterialFunction = Function;
+			Context.AssetPath = NormalizeAssetPath(Function->GetPathName());
+			UMaterialExpression* Node = FindNodeById(Context, TrimmedNodeId);
+			if (!Node)
+			{
+				OutError = FString::Printf(TEXT("Node not found: %s"), *TrimmedNodeId);
+				return nullptr;
+			}
+			if (UMaterialExpressionFunctionOutput* FunctionOutput = Cast<UMaterialExpressionFunctionOutput>(Node))
+			{
+				return FunctionOutput;
+			}
+			OutError = FString::Printf(TEXT("Node '%s' is not a material function output"), *TrimmedNodeId);
+			return nullptr;
+		}
+
+		if (TrimmedOutputName.IsEmpty())
+		{
+			OutError = TEXT("Provide either 'node_id' or 'output_name'");
+			return nullptr;
+		}
+
+		TArray<UMaterialExpressionFunctionInput*> Inputs;
+		TArray<UMaterialExpressionFunctionOutput*> Outputs;
+		GatherMaterialFunctionIONodes(Function, Inputs, Outputs);
+		for (UMaterialExpressionFunctionOutput* OutputExpression : Outputs)
+		{
+			if (OutputExpression && OutputExpression->OutputName.ToString().Equals(TrimmedOutputName, ESearchCase::IgnoreCase))
+			{
+				return OutputExpression;
+			}
+		}
+
+		OutError = FString::Printf(TEXT("Function output not found: %s"), *TrimmedOutputName);
+		return nullptr;
+	}
+
 	static void WriteMaterialSettings(const UMaterial* Material, const TSharedPtr<FJsonObject>& Result)
 	{
 		Result->SetStringField(TEXT("domain"), DomainToString(Material->MaterialDomain));
@@ -2156,6 +2541,16 @@ TArray<FMCPToolInfo> FMaterialService::GetAvailableTools() const
 	AddTool(TEXT("material_instance/set_static_switch"), TEXT("Set a static switch parameter override on a material instance."));
 	AddTool(TEXT("material_instance/set_static_component_mask"), TEXT("Set a static component mask override on a material instance."));
 	AddTool(TEXT("material_instance/copy_overrides_from_instance"), TEXT("Copy overrides from one material instance to another."));
+	AddTool(TEXT("material_function/get_info"), TEXT("Get metadata and IO summary for a material function."));
+	AddTool(TEXT("material_function/list_inputs"), TEXT("List input nodes in a material function."));
+	AddTool(TEXT("material_function/list_outputs"), TEXT("List output nodes in a material function."));
+	AddTool(TEXT("material_function/create_input"), TEXT("Create a function input node in a material function."));
+	AddTool(TEXT("material_function/create_output"), TEXT("Create a function output node in a material function."));
+	AddTool(TEXT("material_function/remove_input"), TEXT("Remove a function input node from a material function."));
+	AddTool(TEXT("material_function/remove_output"), TEXT("Remove a function output node from a material function."));
+	AddTool(TEXT("material_function/add_call_node"), TEXT("Add a material function call node to a material or material function graph."));
+	AddTool(TEXT("material_function/set_io_types"), TEXT("Set input/output value typing for a material function interface."));
+	AddTool(TEXT("material_function/compile"), TEXT("Compile/update a material function and dependent materials."));
 	AddTool(TEXT("capabilities"), TEXT("Report baseline material service capabilities and module availability."));
 	return Tools;
 }
@@ -2208,6 +2603,16 @@ FMCPResponse FMaterialService::HandleRequest(const FMCPRequest& Request, const F
 	if (MethodName == TEXT("material_instance/set_static_switch")) return HandleMaterialInstanceSetStaticSwitch(Request);
 	if (MethodName == TEXT("material_instance/set_static_component_mask")) return HandleMaterialInstanceSetStaticComponentMask(Request);
 	if (MethodName == TEXT("material_instance/copy_overrides_from_instance")) return HandleMaterialInstanceCopyOverridesFromInstance(Request);
+	if (MethodName == TEXT("material_function/get_info")) return HandleMaterialFunctionGetInfo(Request);
+	if (MethodName == TEXT("material_function/list_inputs")) return HandleMaterialFunctionListInputs(Request);
+	if (MethodName == TEXT("material_function/list_outputs")) return HandleMaterialFunctionListOutputs(Request);
+	if (MethodName == TEXT("material_function/create_input")) return HandleMaterialFunctionCreateInput(Request);
+	if (MethodName == TEXT("material_function/create_output")) return HandleMaterialFunctionCreateOutput(Request);
+	if (MethodName == TEXT("material_function/remove_input")) return HandleMaterialFunctionRemoveInput(Request);
+	if (MethodName == TEXT("material_function/remove_output")) return HandleMaterialFunctionRemoveOutput(Request);
+	if (MethodName == TEXT("material_function/add_call_node")) return HandleMaterialFunctionAddCallNode(Request);
+	if (MethodName == TEXT("material_function/set_io_types")) return HandleMaterialFunctionSetIOTypes(Request);
+	if (MethodName == TEXT("material_function/compile")) return HandleMaterialFunctionCompile(Request);
 	if (MethodName == TEXT("capabilities")) return HandleCapabilities(Request);
 	return MethodNotFound(Request.Id, TEXT("material"), MethodName);
 }
@@ -6354,6 +6759,972 @@ FMCPResponse FMaterialService::HandleMaterialInstanceCopyOverridesFromInstance(c
 	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
 }
 
+FMCPResponse FMaterialService::HandleMaterialFunctionGetInfo(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString FunctionPath;
+	if (!Request.Params->TryGetStringField(TEXT("material_function_path"), FunctionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), FunctionPath);
+	}
+	if (FunctionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_function_path'"));
+	}
+
+	auto Task = [FunctionPath]() -> TSharedPtr<FJsonObject>
+	{
+		FString FunctionAssetPath;
+		FString Error;
+		UMaterialFunction* Function = ResolveMaterialFunctionAsset(FunctionPath, FunctionAssetPath, Error);
+		if (!Function)
+		{
+			return MakeFailure(Error);
+		}
+
+		TArray<UMaterialExpressionFunctionInput*> Inputs;
+		TArray<UMaterialExpressionFunctionOutput*> Outputs;
+		GatherMaterialFunctionIONodes(Function, Inputs, Outputs);
+
+		int32 FunctionCallNodeCount = 0;
+		for (UMaterialExpression* Expression : Function->GetExpressions())
+		{
+			if (Expression && Expression->IsA<UMaterialExpressionMaterialFunctionCall>())
+			{
+				++FunctionCallNodeCount;
+			}
+		}
+
+		TArray<UMaterialFunctionInterface*> DependentFunctions;
+		Function->GetDependentFunctions(DependentFunctions);
+
+		TArray<TSharedPtr<FJsonValue>> LibraryCategories;
+		for (const FText& CategoryText : Function->LibraryCategoriesText)
+		{
+			LibraryCategories.Add(MakeShared<FJsonValueString>(CategoryText.ToString()));
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_function_path"), FunctionAssetPath);
+		Result->SetStringField(TEXT("asset_class"), Function->GetClass()->GetPathName());
+		Result->SetStringField(TEXT("description"), Function->Description);
+		Result->SetStringField(TEXT("user_exposed_caption"), Function->UserExposedCaption);
+		Result->SetBoolField(TEXT("expose_to_library"), Function->bExposeToLibrary != 0);
+		Result->SetArrayField(TEXT("library_categories"), LibraryCategories);
+		Result->SetNumberField(TEXT("input_count"), Inputs.Num());
+		Result->SetNumberField(TEXT("output_count"), Outputs.Num());
+		Result->SetNumberField(TEXT("function_call_node_count"), FunctionCallNodeCount);
+		Result->SetNumberField(TEXT("dependent_function_count"), DependentFunctions.Num());
+		Result->SetStringField(TEXT("state_id"), Function->StateId.IsValid() ? Function->StateId.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+		Result->SetStringField(TEXT("preview_material_domain"), DomainToString(Function->PreviewMaterialDomain));
+		Result->SetStringField(TEXT("preview_blend_mode"), BlendModeToString(Function->PreviewBlendMode));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialFunctionListInputs(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString FunctionPath;
+	if (!Request.Params->TryGetStringField(TEXT("material_function_path"), FunctionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), FunctionPath);
+	}
+	if (FunctionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_function_path'"));
+	}
+
+	auto Task = [FunctionPath]() -> TSharedPtr<FJsonObject>
+	{
+		FString FunctionAssetPath;
+		FString Error;
+		UMaterialFunction* Function = ResolveMaterialFunctionAsset(FunctionPath, FunctionAssetPath, Error);
+		if (!Function)
+		{
+			return MakeFailure(Error);
+		}
+
+		TArray<UMaterialExpressionFunctionInput*> Inputs;
+		TArray<UMaterialExpressionFunctionOutput*> Outputs;
+		GatherMaterialFunctionIONodes(Function, Inputs, Outputs);
+
+		TArray<TSharedPtr<FJsonValue>> InputArray;
+		for (UMaterialExpressionFunctionInput* InputExpression : Inputs)
+		{
+			InputArray.Add(MakeShared<FJsonValueObject>(BuildMaterialFunctionInputJson(InputExpression)));
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_function_path"), FunctionAssetPath);
+		Result->SetArrayField(TEXT("inputs"), InputArray);
+		Result->SetNumberField(TEXT("input_count"), InputArray.Num());
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialFunctionListOutputs(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString FunctionPath;
+	if (!Request.Params->TryGetStringField(TEXT("material_function_path"), FunctionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), FunctionPath);
+	}
+	if (FunctionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_function_path'"));
+	}
+
+	auto Task = [FunctionPath]() -> TSharedPtr<FJsonObject>
+	{
+		FString FunctionAssetPath;
+		FString Error;
+		UMaterialFunction* Function = ResolveMaterialFunctionAsset(FunctionPath, FunctionAssetPath, Error);
+		if (!Function)
+		{
+			return MakeFailure(Error);
+		}
+
+		TArray<UMaterialExpressionFunctionInput*> Inputs;
+		TArray<UMaterialExpressionFunctionOutput*> Outputs;
+		GatherMaterialFunctionIONodes(Function, Inputs, Outputs);
+
+		TArray<TSharedPtr<FJsonValue>> OutputArray;
+		for (UMaterialExpressionFunctionOutput* OutputExpression : Outputs)
+		{
+			OutputArray.Add(MakeShared<FJsonValueObject>(BuildMaterialFunctionOutputJson(OutputExpression)));
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_function_path"), FunctionAssetPath);
+		Result->SetArrayField(TEXT("outputs"), OutputArray);
+		Result->SetNumberField(TEXT("output_count"), OutputArray.Num());
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialFunctionCreateInput(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString FunctionPath;
+	if (!Request.Params->TryGetStringField(TEXT("material_function_path"), FunctionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), FunctionPath);
+	}
+	if (FunctionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_function_path'"));
+	}
+
+	FString InputName;
+	Request.Params->TryGetStringField(TEXT("input_name"), InputName);
+	const FString TrimmedInputName = InputName.TrimStartAndEnd();
+
+	FString InputTypeText = TEXT("scalar");
+	if (!Request.Params->TryGetStringField(TEXT("input_type"), InputTypeText))
+	{
+		Request.Params->TryGetStringField(TEXT("value_type"), InputTypeText);
+	}
+
+	EFunctionInputType InputType = FunctionInput_Scalar;
+	FString TypeError;
+	if (!ParseFunctionInputTypeToken(InputTypeText, InputType, TypeError))
+	{
+		return InvalidParams(Request.Id, TypeError);
+	}
+
+	FString Description;
+	const bool bHasDescription = Request.Params->TryGetStringField(TEXT("description"), Description);
+
+	double NumericValue = 0.0;
+	bool bHasSortPriority = false;
+	int32 SortPriority = 0;
+	if (Request.Params->TryGetNumberField(TEXT("sort_priority"), NumericValue))
+	{
+		bHasSortPriority = true;
+		SortPriority = static_cast<int32>(NumericValue);
+	}
+
+	int32 NodePosX = 0;
+	int32 NodePosY = 0;
+	if (Request.Params->TryGetNumberField(TEXT("node_pos_x"), NumericValue))
+	{
+		NodePosX = static_cast<int32>(NumericValue);
+	}
+	if (Request.Params->TryGetNumberField(TEXT("node_pos_y"), NumericValue))
+	{
+		NodePosY = static_cast<int32>(NumericValue);
+	}
+
+	bool bHasUsePreviewValueAsDefault = false;
+	bool bUsePreviewValueAsDefault = false;
+	if (Request.Params->HasField(TEXT("use_preview_value_as_default")))
+	{
+		bHasUsePreviewValueAsDefault = true;
+		Request.Params->TryGetBoolField(TEXT("use_preview_value_as_default"), bUsePreviewValueAsDefault);
+	}
+
+	const bool bHasPreviewValue = Request.Params->HasField(TEXT("preview_value"));
+	FLinearColor PreviewValue = FLinearColor::Black;
+	if (bHasPreviewValue)
+	{
+		FString PreviewError;
+		if (!TryReadLinearColor(Request.Params, TEXT("preview_value"), PreviewValue, PreviewError))
+		{
+			return InvalidParams(Request.Id, PreviewError);
+		}
+	}
+
+	auto Task = [FunctionPath, TrimmedInputName, InputType, bHasDescription, Description, bHasSortPriority, SortPriority, NodePosX, NodePosY, bHasUsePreviewValueAsDefault, bUsePreviewValueAsDefault, bHasPreviewValue, PreviewValue]() -> TSharedPtr<FJsonObject>
+	{
+		FString FunctionAssetPath;
+		FString Error;
+		UMaterialFunction* Function = ResolveMaterialFunctionAsset(FunctionPath, FunctionAssetPath, Error);
+		if (!Function)
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpression* NewExpression = UMaterialEditingLibrary::CreateMaterialExpressionEx(
+			nullptr,
+			Function,
+			UMaterialExpressionFunctionInput::StaticClass(),
+			nullptr,
+			NodePosX,
+			NodePosY,
+			true);
+		UMaterialExpressionFunctionInput* NewInput = Cast<UMaterialExpressionFunctionInput>(NewExpression);
+		if (!NewInput)
+		{
+			return MakeFailure(TEXT("Failed to create material function input node"));
+		}
+
+		NewInput->Modify();
+		NewInput->InputType = InputType;
+		if (!TrimmedInputName.IsEmpty())
+		{
+			NewInput->InputName = FName(*TrimmedInputName);
+			NewInput->ValidateName();
+		}
+		if (bHasDescription)
+		{
+			NewInput->Description = Description;
+		}
+		if (bHasSortPriority)
+		{
+			NewInput->SortPriority = SortPriority;
+		}
+		if (bHasUsePreviewValueAsDefault)
+		{
+			NewInput->bUsePreviewValueAsDefault = bUsePreviewValueAsDefault ? 1 : 0;
+		}
+		if (bHasPreviewValue)
+		{
+			NewInput->PreviewValue = FVector4f(PreviewValue.R, PreviewValue.G, PreviewValue.B, PreviewValue.A);
+		}
+		NewInput->ConditionallyGenerateId(true);
+		NewInput->ValidateName();
+
+		Function->UpdateInputOutputTypes();
+		UMaterialEditingLibrary::UpdateMaterialFunction(Function, nullptr);
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_function_path"), FunctionAssetPath);
+		Result->SetObjectField(TEXT("input"), BuildMaterialFunctionInputJson(NewInput));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialFunctionCreateOutput(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString FunctionPath;
+	if (!Request.Params->TryGetStringField(TEXT("material_function_path"), FunctionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), FunctionPath);
+	}
+	if (FunctionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_function_path'"));
+	}
+
+	FString OutputName;
+	Request.Params->TryGetStringField(TEXT("output_name"), OutputName);
+	const FString TrimmedOutputName = OutputName.TrimStartAndEnd();
+
+	FString Description;
+	const bool bHasDescription = Request.Params->TryGetStringField(TEXT("description"), Description);
+
+	double NumericValue = 0.0;
+	bool bHasSortPriority = false;
+	int32 SortPriority = 0;
+	if (Request.Params->TryGetNumberField(TEXT("sort_priority"), NumericValue))
+	{
+		bHasSortPriority = true;
+		SortPriority = static_cast<int32>(NumericValue);
+	}
+
+	int32 NodePosX = 0;
+	int32 NodePosY = 0;
+	if (Request.Params->TryGetNumberField(TEXT("node_pos_x"), NumericValue))
+	{
+		NodePosX = static_cast<int32>(NumericValue);
+	}
+	if (Request.Params->TryGetNumberField(TEXT("node_pos_y"), NumericValue))
+	{
+		NodePosY = static_cast<int32>(NumericValue);
+	}
+
+	FString FromNodeId;
+	Request.Params->TryGetStringField(TEXT("from_node_id"), FromNodeId);
+	FString FromOutputPin;
+	Request.Params->TryGetStringField(TEXT("from_output_pin"), FromOutputPin);
+	bool bHasFromOutputIndex = false;
+	int32 FromOutputIndex = 0;
+	if (Request.Params->TryGetNumberField(TEXT("from_output_index"), NumericValue))
+	{
+		bHasFromOutputIndex = true;
+		FromOutputIndex = static_cast<int32>(NumericValue);
+	}
+
+	auto Task = [FunctionPath, TrimmedOutputName, bHasDescription, Description, bHasSortPriority, SortPriority, NodePosX, NodePosY, FromNodeId, FromOutputPin, bHasFromOutputIndex, FromOutputIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FString FunctionAssetPath;
+		FString Error;
+		UMaterialFunction* Function = ResolveMaterialFunctionAsset(FunctionPath, FunctionAssetPath, Error);
+		if (!Function)
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpression* NewExpression = UMaterialEditingLibrary::CreateMaterialExpressionEx(
+			nullptr,
+			Function,
+			UMaterialExpressionFunctionOutput::StaticClass(),
+			nullptr,
+			NodePosX,
+			NodePosY,
+			true);
+		UMaterialExpressionFunctionOutput* NewOutput = Cast<UMaterialExpressionFunctionOutput>(NewExpression);
+		if (!NewOutput)
+		{
+			return MakeFailure(TEXT("Failed to create material function output node"));
+		}
+
+		NewOutput->Modify();
+		if (!TrimmedOutputName.IsEmpty())
+		{
+			NewOutput->OutputName = FName(*TrimmedOutputName);
+			NewOutput->ValidateName();
+		}
+		if (bHasDescription)
+		{
+			NewOutput->Description = Description;
+		}
+		if (bHasSortPriority)
+		{
+			NewOutput->SortPriority = SortPriority;
+		}
+		NewOutput->ConditionallyGenerateId(true);
+		NewOutput->ValidateName();
+
+		const FString TrimmedFromNodeId = FromNodeId.TrimStartAndEnd();
+		if (!TrimmedFromNodeId.IsEmpty())
+		{
+			FMaterialGraphContext Context;
+			Context.MaterialFunction = Function;
+			Context.AssetPath = FunctionAssetPath;
+
+			UMaterialExpression* FromNode = FindNodeById(Context, TrimmedFromNodeId);
+			if (!FromNode)
+			{
+				UMaterialEditingLibrary::DeleteMaterialExpressionInFunction(Function, NewOutput);
+				return MakeFailure(FString::Printf(TEXT("Source node not found: %s"), *TrimmedFromNodeId));
+			}
+			if (FromNode->IsA<UMaterialExpressionComment>())
+			{
+				UMaterialEditingLibrary::DeleteMaterialExpressionInFunction(Function, NewOutput);
+				return MakeFailure(TEXT("Cannot connect from a comment node"));
+			}
+
+			int32 ResolvedFromOutputIndex = INDEX_NONE;
+			if (!TryResolveOutputPinIndex(FromNode, FromOutputPin, bHasFromOutputIndex, FromOutputIndex, ResolvedFromOutputIndex, Error))
+			{
+				UMaterialEditingLibrary::DeleteMaterialExpressionInFunction(Function, NewOutput);
+				return MakeFailure(Error);
+			}
+
+			FromNode->Modify();
+			FromNode->ConnectExpression(&NewOutput->A, ResolvedFromOutputIndex);
+		}
+
+		Function->UpdateInputOutputTypes();
+		UMaterialEditingLibrary::UpdateMaterialFunction(Function, nullptr);
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_function_path"), FunctionAssetPath);
+		Result->SetObjectField(TEXT("output"), BuildMaterialFunctionOutputJson(NewOutput));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialFunctionRemoveInput(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString FunctionPath;
+	if (!Request.Params->TryGetStringField(TEXT("material_function_path"), FunctionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), FunctionPath);
+	}
+	if (FunctionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_function_path'"));
+	}
+
+	FString NodeId;
+	FString InputName;
+	Request.Params->TryGetStringField(TEXT("node_id"), NodeId);
+	Request.Params->TryGetStringField(TEXT("input_name"), InputName);
+	if (NodeId.TrimStartAndEnd().IsEmpty() && InputName.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Provide either 'node_id' or 'input_name'"));
+	}
+
+	auto Task = [FunctionPath, NodeId, InputName]() -> TSharedPtr<FJsonObject>
+	{
+		FString FunctionAssetPath;
+		FString Error;
+		UMaterialFunction* Function = ResolveMaterialFunctionAsset(FunctionPath, FunctionAssetPath, Error);
+		if (!Function)
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpressionFunctionInput* Target = ResolveMaterialFunctionInputNode(Function, NodeId, InputName, Error);
+		if (!Target)
+		{
+			return MakeFailure(Error);
+		}
+
+		const FString RemovedNodeId = GetNodeId(Target);
+		const FString RemovedInputName = Target->InputName.ToString();
+		UMaterialEditingLibrary::DeleteMaterialExpressionInFunction(Function, Target);
+		Function->UpdateInputOutputTypes();
+		UMaterialEditingLibrary::UpdateMaterialFunction(Function, nullptr);
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_function_path"), FunctionAssetPath);
+		Result->SetStringField(TEXT("removed_node_id"), RemovedNodeId);
+		Result->SetStringField(TEXT("removed_input_name"), RemovedInputName);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialFunctionRemoveOutput(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString FunctionPath;
+	if (!Request.Params->TryGetStringField(TEXT("material_function_path"), FunctionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), FunctionPath);
+	}
+	if (FunctionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_function_path'"));
+	}
+
+	FString NodeId;
+	FString OutputName;
+	Request.Params->TryGetStringField(TEXT("node_id"), NodeId);
+	Request.Params->TryGetStringField(TEXT("output_name"), OutputName);
+	if (NodeId.TrimStartAndEnd().IsEmpty() && OutputName.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Provide either 'node_id' or 'output_name'"));
+	}
+
+	auto Task = [FunctionPath, NodeId, OutputName]() -> TSharedPtr<FJsonObject>
+	{
+		FString FunctionAssetPath;
+		FString Error;
+		UMaterialFunction* Function = ResolveMaterialFunctionAsset(FunctionPath, FunctionAssetPath, Error);
+		if (!Function)
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpressionFunctionOutput* Target = ResolveMaterialFunctionOutputNode(Function, NodeId, OutputName, Error);
+		if (!Target)
+		{
+			return MakeFailure(Error);
+		}
+
+		const FString RemovedNodeId = GetNodeId(Target);
+		const FString RemovedOutputName = Target->OutputName.ToString();
+		UMaterialEditingLibrary::DeleteMaterialExpressionInFunction(Function, Target);
+		Function->UpdateInputOutputTypes();
+		UMaterialEditingLibrary::UpdateMaterialFunction(Function, nullptr);
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_function_path"), FunctionAssetPath);
+		Result->SetStringField(TEXT("removed_node_id"), RemovedNodeId);
+		Result->SetStringField(TEXT("removed_output_name"), RemovedOutputName);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialFunctionAddCallNode(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString GraphAssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), GraphAssetPath))
+	{
+		Request.Params->TryGetStringField(TEXT("graph_asset_path"), GraphAssetPath);
+	}
+	if (GraphAssetPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	FString FunctionPath;
+	if (!Request.Params->TryGetStringField(TEXT("material_function_path"), FunctionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("called_material_function_path"), FunctionPath);
+	}
+	if (FunctionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_function_path'"));
+	}
+
+	int32 NodePosX = 0;
+	int32 NodePosY = 0;
+	double NumericValue = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("node_pos_x"), NumericValue))
+	{
+		NodePosX = static_cast<int32>(NumericValue);
+	}
+	if (Request.Params->TryGetNumberField(TEXT("node_pos_y"), NumericValue))
+	{
+		NodePosY = static_cast<int32>(NumericValue);
+	}
+
+	auto Task = [GraphAssetPath, FunctionPath, NodePosX, NodePosY]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(GraphAssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		FString CalledFunctionAssetPath;
+		UMaterialFunction* CalledFunction = ResolveMaterialFunctionAsset(FunctionPath, CalledFunctionAssetPath, Error);
+		if (!CalledFunction)
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpression* NewExpression = UMaterialEditingLibrary::CreateMaterialExpressionEx(
+			Context.Material,
+			Context.MaterialFunction,
+			UMaterialExpressionMaterialFunctionCall::StaticClass(),
+			CalledFunction,
+			NodePosX,
+			NodePosY,
+			true);
+		UMaterialExpressionMaterialFunctionCall* CallNode = Cast<UMaterialExpressionMaterialFunctionCall>(NewExpression);
+		if (!CallNode)
+		{
+			return MakeFailure(TEXT("Failed to create material function call node"));
+		}
+
+		if (!CallNode->SetMaterialFunction(CalledFunction))
+		{
+			if (Context.Material)
+			{
+				UMaterialEditingLibrary::DeleteMaterialExpression(Context.Material, CallNode);
+			}
+			else if (Context.MaterialFunction)
+			{
+				UMaterialEditingLibrary::DeleteMaterialExpressionInFunction(Context.MaterialFunction, CallNode);
+			}
+			return MakeFailure(FString::Printf(TEXT("Failed to assign material function to call node: %s"), *CalledFunctionAssetPath));
+		}
+
+		Context.MarkDirty();
+		if (Context.Material)
+		{
+			UMaterialEditingLibrary::RecompileMaterial(Context.Material);
+		}
+		else if (Context.MaterialFunction)
+		{
+			Context.MaterialFunction->UpdateInputOutputTypes();
+			UMaterialEditingLibrary::UpdateMaterialFunction(Context.MaterialFunction, nullptr);
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("asset_type"), Context.Material ? TEXT("material") : TEXT("material_function"));
+		Result->SetStringField(TEXT("called_material_function_path"), CalledFunctionAssetPath);
+		Result->SetNumberField(TEXT("function_input_count"), CallNode->FunctionInputs.Num());
+		Result->SetNumberField(TEXT("function_output_count"), CallNode->FunctionOutputs.Num());
+		Result->SetObjectField(TEXT("node"), BuildNodeJson(CallNode));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialFunctionSetIOTypes(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString FunctionPath;
+	if (!Request.Params->TryGetStringField(TEXT("material_function_path"), FunctionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), FunctionPath);
+	}
+	if (FunctionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_function_path'"));
+	}
+
+	struct FIOTypeUpdate
+	{
+		bool bTargetOutput = false;
+		FString NodeId;
+		FString InputName;
+		FString OutputName;
+		EFunctionInputType InputType = FunctionInput_Scalar;
+	};
+
+	TArray<FIOTypeUpdate> Updates;
+	const TArray<TSharedPtr<FJsonValue>>* UpdatesArray = nullptr;
+	if (Request.Params->TryGetArrayField(TEXT("updates"), UpdatesArray) && UpdatesArray)
+	{
+		for (const TSharedPtr<FJsonValue>& UpdateValue : *UpdatesArray)
+		{
+			const TSharedPtr<FJsonObject>* UpdateObjectPtr = nullptr;
+			if (!UpdateValue.IsValid() || !UpdateValue->TryGetObject(UpdateObjectPtr) || !UpdateObjectPtr || !UpdateObjectPtr->IsValid())
+			{
+				return InvalidParams(Request.Id, TEXT("Each item in 'updates' must be an object"));
+			}
+			const TSharedPtr<FJsonObject>& UpdateObject = *UpdateObjectPtr;
+
+			FIOTypeUpdate Update;
+			FString Kind;
+			if (!UpdateObject->TryGetStringField(TEXT("io_kind"), Kind))
+			{
+				UpdateObject->TryGetStringField(TEXT("target_kind"), Kind);
+			}
+			const FString KindToken = NormalizeParameterToken(Kind.IsEmpty() ? TEXT("input") : Kind);
+			if (KindToken == TEXT("output"))
+			{
+				Update.bTargetOutput = true;
+			}
+			else if (KindToken == TEXT("input"))
+			{
+				Update.bTargetOutput = false;
+			}
+			else
+			{
+				return InvalidParams(Request.Id, FString::Printf(TEXT("Invalid io_kind '%s' in updates"), *Kind));
+			}
+
+			UpdateObject->TryGetStringField(TEXT("node_id"), Update.NodeId);
+			UpdateObject->TryGetStringField(TEXT("input_name"), Update.InputName);
+			UpdateObject->TryGetStringField(TEXT("output_name"), Update.OutputName);
+
+			FString TypeText;
+			if (!UpdateObject->TryGetStringField(TEXT("input_type"), TypeText))
+			{
+				if (!UpdateObject->TryGetStringField(TEXT("value_type"), TypeText))
+				{
+					UpdateObject->TryGetStringField(TEXT("type"), TypeText);
+				}
+			}
+			FString TypeError;
+			if (!ParseFunctionInputTypeToken(TypeText, Update.InputType, TypeError))
+			{
+				return InvalidParams(Request.Id, FString::Printf(TEXT("Invalid update type: %s"), *TypeError));
+			}
+
+			if (Update.bTargetOutput)
+			{
+				if (Update.NodeId.TrimStartAndEnd().IsEmpty() && Update.OutputName.TrimStartAndEnd().IsEmpty())
+				{
+					return InvalidParams(Request.Id, TEXT("Output updates require 'node_id' or 'output_name'"));
+				}
+			}
+			else if (Update.NodeId.TrimStartAndEnd().IsEmpty() && Update.InputName.TrimStartAndEnd().IsEmpty())
+			{
+				return InvalidParams(Request.Id, TEXT("Input updates require 'node_id' or 'input_name'"));
+			}
+
+			Updates.Add(Update);
+		}
+	}
+	else
+	{
+		FIOTypeUpdate Update;
+		FString Kind;
+		Request.Params->TryGetStringField(TEXT("io_kind"), Kind);
+		const FString KindToken = NormalizeParameterToken(Kind.IsEmpty() ? TEXT("input") : Kind);
+		Update.bTargetOutput = KindToken == TEXT("output");
+		if (!(Update.bTargetOutput || KindToken == TEXT("input")))
+		{
+			return InvalidParams(Request.Id, FString::Printf(TEXT("Invalid io_kind '%s'"), *Kind));
+		}
+
+		Request.Params->TryGetStringField(TEXT("node_id"), Update.NodeId);
+		Request.Params->TryGetStringField(TEXT("input_name"), Update.InputName);
+		Request.Params->TryGetStringField(TEXT("output_name"), Update.OutputName);
+
+		FString TypeText;
+		if (!Request.Params->TryGetStringField(TEXT("input_type"), TypeText))
+		{
+			if (!Request.Params->TryGetStringField(TEXT("value_type"), TypeText))
+			{
+				Request.Params->TryGetStringField(TEXT("type"), TypeText);
+			}
+		}
+		FString TypeError;
+		if (!ParseFunctionInputTypeToken(TypeText, Update.InputType, TypeError))
+		{
+			return InvalidParams(Request.Id, TypeError);
+		}
+
+		if (Update.bTargetOutput)
+		{
+			if (Update.NodeId.TrimStartAndEnd().IsEmpty() && Update.OutputName.TrimStartAndEnd().IsEmpty())
+			{
+				return InvalidParams(Request.Id, TEXT("Provide 'node_id' or 'output_name' when io_kind='output'"));
+			}
+		}
+		else if (Update.NodeId.TrimStartAndEnd().IsEmpty() && Update.InputName.TrimStartAndEnd().IsEmpty())
+		{
+			return InvalidParams(Request.Id, TEXT("Provide 'node_id' or 'input_name' when io_kind='input'"));
+		}
+
+		Updates.Add(Update);
+	}
+
+	if (Updates.Num() == 0)
+	{
+		return InvalidParams(Request.Id, TEXT("No updates provided"));
+	}
+
+	auto Task = [FunctionPath, Updates]() -> TSharedPtr<FJsonObject>
+	{
+		FString FunctionAssetPath;
+		FString Error;
+		UMaterialFunction* Function = ResolveMaterialFunctionAsset(FunctionPath, FunctionAssetPath, Error);
+		if (!Function)
+		{
+			return MakeFailure(Error);
+		}
+
+		int32 ChangedCount = 0;
+		TArray<TSharedPtr<FJsonValue>> AppliedUpdates;
+		for (const FIOTypeUpdate& Update : Updates)
+		{
+			if (!Update.bTargetOutput)
+			{
+				UMaterialExpressionFunctionInput* InputExpression = ResolveMaterialFunctionInputNode(Function, Update.NodeId, Update.InputName, Error);
+				if (!InputExpression)
+				{
+					return MakeFailure(Error);
+				}
+
+				const bool bChanged = InputExpression->InputType != Update.InputType;
+				if (bChanged)
+				{
+					InputExpression->Modify();
+					InputExpression->InputType = Update.InputType;
+					++ChangedCount;
+				}
+
+				TSharedPtr<FJsonObject> Applied = MakeShared<FJsonObject>();
+				Applied->SetStringField(TEXT("io_kind"), TEXT("input"));
+				Applied->SetStringField(TEXT("node_id"), GetNodeId(InputExpression));
+				Applied->SetStringField(TEXT("input_name"), InputExpression->InputName.ToString());
+				Applied->SetStringField(TEXT("input_type"), FunctionInputTypeToString(InputExpression->InputType));
+				Applied->SetBoolField(TEXT("changed"), bChanged);
+				AppliedUpdates.Add(MakeShared<FJsonValueObject>(Applied));
+				continue;
+			}
+
+			UMaterialExpressionFunctionOutput* OutputExpression = ResolveMaterialFunctionOutputNode(Function, Update.NodeId, Update.OutputName, Error);
+			if (!OutputExpression)
+			{
+				return MakeFailure(Error);
+			}
+
+			UMaterialExpressionFunctionInput* DriverInput = Cast<UMaterialExpressionFunctionInput>(OutputExpression->A.Expression);
+			if (!DriverInput)
+			{
+				return MakeFailure(FString::Printf(
+					TEXT("Output '%s' is not driven directly by a function input node. Connect it to a function input and retry."),
+					*OutputExpression->OutputName.ToString()));
+			}
+
+			const bool bChanged = DriverInput->InputType != Update.InputType;
+			if (bChanged)
+			{
+				DriverInput->Modify();
+				DriverInput->InputType = Update.InputType;
+				++ChangedCount;
+			}
+
+			TSharedPtr<FJsonObject> Applied = MakeShared<FJsonObject>();
+			Applied->SetStringField(TEXT("io_kind"), TEXT("output"));
+			Applied->SetStringField(TEXT("node_id"), GetNodeId(OutputExpression));
+			Applied->SetStringField(TEXT("output_name"), OutputExpression->OutputName.ToString());
+			Applied->SetStringField(TEXT("driver_input_node_id"), GetNodeId(DriverInput));
+			Applied->SetStringField(TEXT("driver_input_name"), DriverInput->InputName.ToString());
+			Applied->SetStringField(TEXT("input_type"), FunctionInputTypeToString(DriverInput->InputType));
+			Applied->SetBoolField(TEXT("changed"), bChanged);
+			AppliedUpdates.Add(MakeShared<FJsonValueObject>(Applied));
+		}
+
+		if (ChangedCount > 0)
+		{
+			Function->UpdateInputOutputTypes();
+			UMaterialEditingLibrary::UpdateMaterialFunction(Function, nullptr);
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_function_path"), FunctionAssetPath);
+		Result->SetNumberField(TEXT("requested_updates"), Updates.Num());
+		Result->SetNumberField(TEXT("changed_updates"), ChangedCount);
+		Result->SetArrayField(TEXT("updates"), AppliedUpdates);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialFunctionCompile(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString FunctionPath;
+	if (!Request.Params->TryGetStringField(TEXT("material_function_path"), FunctionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), FunctionPath);
+	}
+	if (FunctionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_function_path'"));
+	}
+
+	FString PreviewMaterialPath;
+	Request.Params->TryGetStringField(TEXT("preview_material_path"), PreviewMaterialPath);
+	const FString TrimmedPreviewMaterialPath = PreviewMaterialPath.TrimStartAndEnd();
+
+	auto Task = [FunctionPath, TrimmedPreviewMaterialPath]() -> TSharedPtr<FJsonObject>
+	{
+		FString FunctionAssetPath;
+		FString Error;
+		UMaterialFunction* Function = ResolveMaterialFunctionAsset(FunctionPath, FunctionAssetPath, Error);
+		if (!Function)
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterial* PreviewMaterial = nullptr;
+		if (!TrimmedPreviewMaterialPath.IsEmpty())
+		{
+			PreviewMaterial = LoadAssetAs<UMaterial>(TrimmedPreviewMaterialPath);
+			if (!PreviewMaterial)
+			{
+				return MakeFailure(FString::Printf(TEXT("Preview material not found: %s"), *TrimmedPreviewMaterialPath));
+			}
+		}
+
+		const FGuid PreviousStateId = Function->StateId;
+		Function->UpdateInputOutputTypes();
+		UMaterialEditingLibrary::UpdateMaterialFunction(Function, PreviewMaterial);
+		const FGuid CurrentStateId = Function->StateId;
+
+		TArray<UMaterialFunctionInterface*> DependentFunctions;
+		Function->GetDependentFunctions(DependentFunctions);
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_function_path"), FunctionAssetPath);
+		Result->SetBoolField(TEXT("state_id_changed"), PreviousStateId != CurrentStateId);
+		Result->SetStringField(TEXT("previous_state_id"), PreviousStateId.IsValid() ? PreviousStateId.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+		Result->SetStringField(TEXT("state_id"), CurrentStateId.IsValid() ? CurrentStateId.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+		Result->SetNumberField(TEXT("dependent_function_count"), DependentFunctions.Num());
+		Result->SetStringField(TEXT("preview_material_path"), PreviewMaterial ? NormalizeAssetPath(PreviewMaterial->GetPathName()) : FString());
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
 FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 {
 	auto Task = []() -> TSharedPtr<FJsonObject>
@@ -6375,6 +7746,7 @@ FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 		PhasesObj->SetBoolField(TEXT("phase_4_material_output_authoring"), true);
 		PhasesObj->SetBoolField(TEXT("phase_5_parameter_authoring"), true);
 		PhasesObj->SetBoolField(TEXT("phase_6_material_instance_support"), true);
+		PhasesObj->SetBoolField(TEXT("phase_7_material_function_support"), true);
 		Result->SetObjectField(TEXT("phases"), PhasesObj);
 
 		TSharedPtr<FJsonObject> DependenciesObj = MakeShared<FJsonObject>();
