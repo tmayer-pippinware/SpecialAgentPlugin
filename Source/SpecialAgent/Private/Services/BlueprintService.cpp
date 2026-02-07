@@ -3,6 +3,8 @@
 #include "Services/BlueprintService.h"
 
 #include "GameThreadDispatcher.h"
+#include "AssetToolsModule.h"
+#include "IAssetTools.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "BlueprintEditorLibrary.h"
 #include "EditorAssetLibrary.h"
@@ -23,11 +25,13 @@
 #include "K2Node_CustomEvent.h"
 #include "K2Node_EditablePinBase.h"
 #include "K2Node_Event.h"
+#include "K2Node_BaseAsyncTask.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
 #include "K2Node.h"
 #include "K2Node_Knot.h"
 #include "K2Node_MacroInstance.h"
+#include "K2Node_Timeline.h"
 #include "K2Node_Variable.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
@@ -39,12 +43,15 @@
 #include "Engine/EngineTypes.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
+#include "Engine/TimelineTemplate.h"
 #include "Animation/AnimBlueprint.h"
 #include "Animation/Skeleton.h"
 #include "GameFramework/Actor.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
 #include "UObject/CoreNetTypes.h"
+#include "UObject/ObjectRedirector.h"
+#include "UObject/UnrealType.h"
 #include "UObject/UObjectIterator.h"
 #include "Misc/DataValidation.h"
 #include "Misc/EngineVersion.h"
@@ -4190,6 +4197,177 @@ TArray<FMCPToolInfo> FBlueprintService::GetAvailableTools() const
 
 	{
 		FMCPToolInfo Tool;
+		Tool.Name = TEXT("list_node_classes");
+		Tool.Description = TEXT("List graph node classes that can be used for a graph context.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Optional blueprint asset path for context filtering."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name when blueprint_path is provided (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> SearchParam = MakeShared<FJsonObject>();
+		SearchParam->SetStringField(TEXT("type"), TEXT("string"));
+		SearchParam->SetStringField(TEXT("description"), TEXT("Optional case-insensitive class name/path filter."));
+		Tool.Parameters->SetObjectField(TEXT("search"), SearchParam);
+
+		TSharedPtr<FJsonObject> MaxParam = MakeShared<FJsonObject>();
+		MaxParam->SetStringField(TEXT("type"), TEXT("number"));
+		MaxParam->SetStringField(TEXT("description"), TEXT("Optional max number of classes to return (default: 500)."));
+		Tool.Parameters->SetObjectField(TEXT("max_results"), MaxParam);
+
+		TSharedPtr<FJsonObject> IncludeAbstractParam = MakeShared<FJsonObject>();
+		IncludeAbstractParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		IncludeAbstractParam->SetStringField(TEXT("description"), TEXT("Include abstract node classes (default: false)."));
+		Tool.Parameters->SetObjectField(TEXT("include_abstract"), IncludeAbstractParam);
+
+		TSharedPtr<FJsonObject> IncludeDeprecatedParam = MakeShared<FJsonObject>();
+		IncludeDeprecatedParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		IncludeDeprecatedParam->SetStringField(TEXT("description"), TEXT("Include deprecated/newer-version node classes (default: false)."));
+		Tool.Parameters->SetObjectField(TEXT("include_deprecated"), IncludeDeprecatedParam);
+
+		TSharedPtr<FJsonObject> IncludeNonK2Param = MakeShared<FJsonObject>();
+		IncludeNonK2Param->SetStringField(TEXT("type"), TEXT("boolean"));
+		IncludeNonK2Param->SetStringField(TEXT("description"), TEXT("Include non-UK2Node classes (default: false)."));
+		Tool.Parameters->SetObjectField(TEXT("include_non_k2"), IncludeNonK2Param);
+
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("set_node_property");
+		Tool.Description = TEXT("Set a node property value (typed scalar or import-text fallback).");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> NodeParam = MakeShared<FJsonObject>();
+		NodeParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeParam->SetStringField(TEXT("description"), TEXT("Target node id."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeParam);
+
+		TSharedPtr<FJsonObject> PropertyParam = MakeShared<FJsonObject>();
+		PropertyParam->SetStringField(TEXT("type"), TEXT("string"));
+		PropertyParam->SetStringField(TEXT("description"), TEXT("Node property name."));
+		Tool.Parameters->SetObjectField(TEXT("property_name"), PropertyParam);
+
+		TSharedPtr<FJsonObject> ValueParam = MakeShared<FJsonObject>();
+		ValueParam->SetStringField(TEXT("description"), TEXT("Property value. Scalars are typed automatically; complex types can be passed as Unreal import-text string."));
+		Tool.Parameters->SetObjectField(TEXT("value"), ValueParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("node_id"));
+		Tool.RequiredParams.Add(TEXT("property_name"));
+		Tool.RequiredParams.Add(TEXT("value"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("add_timeline");
+		Tool.Description = TEXT("Add a timeline template and place a timeline node.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Timeline variable name."));
+		Tool.Parameters->SetObjectField(TEXT("timeline_name"), NameParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name to place the timeline node (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		TSharedPtr<FJsonObject> SpawnNodeParam = MakeShared<FJsonObject>();
+		SpawnNodeParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		SpawnNodeParam->SetStringField(TEXT("description"), TEXT("Whether to spawn a timeline node in graph_name (default: true)."));
+		Tool.Parameters->SetObjectField(TEXT("spawn_node"), SpawnNodeParam);
+
+		TSharedPtr<FJsonObject> XParam = MakeShared<FJsonObject>();
+		XParam->SetStringField(TEXT("type"), TEXT("number"));
+		XParam->SetStringField(TEXT("description"), TEXT("Node X position (default: 0)."));
+		Tool.Parameters->SetObjectField(TEXT("x"), XParam);
+
+		TSharedPtr<FJsonObject> YParam = MakeShared<FJsonObject>();
+		YParam->SetStringField(TEXT("type"), TEXT("number"));
+		YParam->SetStringField(TEXT("description"), TEXT("Node Y position (default: 0)."));
+		Tool.Parameters->SetObjectField(TEXT("y"), YParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("timeline_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("list_latent_actions");
+		Tool.Description = TEXT("List latent/async timeline and function call nodes in Blueprint graphs.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Optional graph name filter. Defaults to all graphs."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("fixup_redirectors_and_references");
+		Tool.Description = TEXT("Find redirectors under a path and run fixup of hard/soft references.");
+
+		TSharedPtr<FJsonObject> RootParam = MakeShared<FJsonObject>();
+		RootParam->SetStringField(TEXT("type"), TEXT("string"));
+		RootParam->SetStringField(TEXT("description"), TEXT("Root content path to scan (default: /Game)."));
+		Tool.Parameters->SetObjectField(TEXT("root_path"), RootParam);
+
+		TSharedPtr<FJsonObject> CheckoutParam = MakeShared<FJsonObject>();
+		CheckoutParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		CheckoutParam->SetStringField(TEXT("description"), TEXT("Whether to show checkout dialogs (default: false)."));
+		Tool.Parameters->SetObjectField(TEXT("checkout_dialog_prompt"), CheckoutParam);
+
+		TSharedPtr<FJsonObject> DeleteParam = MakeShared<FJsonObject>();
+		DeleteParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		DeleteParam->SetStringField(TEXT("description"), TEXT("Delete redirectors after successful fixup (default: true)."));
+		Tool.Parameters->SetObjectField(TEXT("delete_fixed_up_redirectors"), DeleteParam);
+
+		TSharedPtr<FJsonObject> RefreshParam = MakeShared<FJsonObject>();
+		RefreshParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		RefreshParam->SetStringField(TEXT("description"), TEXT("Refresh all loaded blueprint nodes after fixup (default: true)."));
+		Tool.Parameters->SetObjectField(TEXT("refresh_blueprints"), RefreshParam);
+
+		TSharedPtr<FJsonObject> CompileParam = MakeShared<FJsonObject>();
+		CompileParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		CompileParam->SetStringField(TEXT("description"), TEXT("Compile loaded blueprints after refresh (default: false)."));
+		Tool.Parameters->SetObjectField(TEXT("compile_blueprints"), CompileParam);
+
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
 		Tool.Name = TEXT("add_custom_event_node");
 		Tool.Description = TEXT("Add a Custom Event node to a Blueprint graph.");
 
@@ -5461,6 +5639,11 @@ FMCPResponse FBlueprintService::HandleRequest(const FMCPRequest& Request, const 
 	if (MethodName == TEXT("add_variable_get_node")) return Finalize(HandleAddVariableGetNode(Request));
 	if (MethodName == TEXT("add_variable_set_node")) return Finalize(HandleAddVariableSetNode(Request));
 	if (MethodName == TEXT("add_node_by_class")) return Finalize(HandleAddNodeByClass(Request));
+	if (MethodName == TEXT("list_node_classes")) return Finalize(HandleListNodeClasses(Request));
+	if (MethodName == TEXT("set_node_property")) return Finalize(HandleSetNodeProperty(Request));
+	if (MethodName == TEXT("add_timeline")) return Finalize(HandleAddTimeline(Request));
+	if (MethodName == TEXT("list_latent_actions")) return Finalize(HandleListLatentActions(Request));
+	if (MethodName == TEXT("fixup_redirectors_and_references")) return Finalize(HandleFixupRedirectorsAndReferences(Request));
 	if (MethodName == TEXT("add_custom_event_node")) return Finalize(HandleAddCustomEventNode(Request));
 	if (MethodName == TEXT("add_comment_node")) return Finalize(HandleAddCommentNode(Request));
 	if (MethodName == TEXT("add_reroute_node")) return Finalize(HandleAddRerouteNode(Request));
@@ -11301,6 +11484,967 @@ FMCPResponse FBlueprintService::HandleAddNodeByClass(const FMCPRequest& Request)
 		Result->SetBoolField(TEXT("success"), true);
 		Result->SetObjectField(TEXT("node"), BuildNodeJson(SpawnedNode));
 		Result->SetStringField(TEXT("node_class"), NodeClass->GetPathName());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleListNodeClasses(const FMCPRequest& Request)
+{
+	FString BlueprintPath;
+	bool bHasBlueprintPath = false;
+	FString GraphName = TEXT("EventGraph");
+	FString SearchText;
+	int32 MaxResults = 500;
+	bool bIncludeAbstract = false;
+	bool bIncludeDeprecated = false;
+	bool bIncludeNonK2 = false;
+
+	if (Request.Params.IsValid())
+	{
+		bHasBlueprintPath = Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath);
+		Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+		Request.Params->TryGetStringField(TEXT("search"), SearchText);
+		Request.Params->TryGetNumberField(TEXT("max_results"), MaxResults);
+		Request.Params->TryGetBoolField(TEXT("include_abstract"), bIncludeAbstract);
+		Request.Params->TryGetBoolField(TEXT("include_deprecated"), bIncludeDeprecated);
+		Request.Params->TryGetBoolField(TEXT("include_non_k2"), bIncludeNonK2);
+	}
+
+	MaxResults = FMath::Clamp(MaxResults, 1, 5000);
+
+	auto Task = [BlueprintPath, bHasBlueprintPath, GraphName, SearchText, MaxResults, bIncludeAbstract, bIncludeDeprecated, bIncludeNonK2]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = nullptr;
+		UEdGraph* Graph = nullptr;
+		const UEdGraphSchema* GraphSchema = GetDefault<UEdGraphSchema_K2>();
+		if (bHasBlueprintPath)
+		{
+			Blueprint = LoadBlueprint(BlueprintPath);
+			if (!Blueprint)
+			{
+				return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+			}
+
+			Graph = ResolveGraph(Blueprint, GraphName);
+			if (!Graph)
+			{
+				return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+			}
+
+			if (Graph->GetSchema())
+			{
+				GraphSchema = Graph->GetSchema();
+			}
+		}
+
+		const FString SearchLower = SearchText.TrimStartAndEnd().ToLower();
+		struct FNodeClassEntry
+		{
+			FString SortKey;
+			TSharedPtr<FJsonObject> Data;
+		};
+		TArray<FNodeClassEntry> Entries;
+
+		for (TObjectIterator<UClass> It; It; ++It)
+		{
+			UClass* NodeClass = *It;
+			if (!NodeClass || !NodeClass->IsChildOf(UEdGraphNode::StaticClass()))
+			{
+				continue;
+			}
+			if (!bIncludeNonK2 && !NodeClass->IsChildOf(UK2Node::StaticClass()))
+			{
+				continue;
+			}
+			if (!bIncludeAbstract && NodeClass->HasAnyClassFlags(CLASS_Abstract))
+			{
+				continue;
+			}
+
+			const bool bIsDeprecated = NodeClass->HasAnyClassFlags(CLASS_Deprecated | CLASS_NewerVersionExists);
+			if (!bIncludeDeprecated && bIsDeprecated)
+			{
+				continue;
+			}
+
+			const FString NodeClassName = NodeClass->GetName();
+			const FString NodeClassPath = NodeClass->GetPathName();
+			if (!SearchLower.IsEmpty())
+			{
+				const FString CombinedText = NodeClassName.ToLower() + TEXT(" ") + NodeClassPath.ToLower();
+				if (!CombinedText.Contains(SearchLower))
+				{
+					continue;
+				}
+			}
+
+			UEdGraphNode* NodeCDO = NodeClass->GetDefaultObject<UEdGraphNode>();
+			if (!NodeCDO)
+			{
+				continue;
+			}
+
+			const bool bSchemaAllowed = GraphSchema ? NodeCDO->CanCreateUnderSpecifiedSchema(GraphSchema) : true;
+			if (!bSchemaAllowed)
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> EntryObj = MakeShared<FJsonObject>();
+			EntryObj->SetStringField(TEXT("class_name"), NodeClassName);
+			EntryObj->SetStringField(TEXT("class_path"), NodeClassPath);
+			EntryObj->SetStringField(TEXT("display_title"), NodeClass->GetDisplayNameText().ToString());
+			EntryObj->SetBoolField(TEXT("is_k2_node"), NodeClass->IsChildOf(UK2Node::StaticClass()));
+			EntryObj->SetBoolField(TEXT("is_abstract"), NodeClass->HasAnyClassFlags(CLASS_Abstract));
+			EntryObj->SetBoolField(TEXT("is_deprecated"), bIsDeprecated);
+			EntryObj->SetBoolField(TEXT("schema_allowed"), bSchemaAllowed);
+			EntryObj->SetBoolField(TEXT("graph_compatible"), bSchemaAllowed);
+
+			Entries.Add({ NodeClassName.ToLower(), EntryObj });
+		}
+
+		Entries.Sort([](const FNodeClassEntry& A, const FNodeClassEntry& B)
+		{
+			return A.SortKey < B.SortKey;
+		});
+
+		const int32 TotalMatches = Entries.Num();
+		const int32 ReturnedCount = FMath::Min(TotalMatches, MaxResults);
+		const bool bTruncated = ReturnedCount < TotalMatches;
+
+		TArray<TSharedPtr<FJsonValue>> ClassesJson;
+		ClassesJson.Reserve(ReturnedCount);
+		for (int32 Index = 0; Index < ReturnedCount; ++Index)
+		{
+			ClassesJson.Add(MakeShared<FJsonValueObject>(Entries[Index].Data));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetArrayField(TEXT("node_classes"), ClassesJson);
+		Result->SetNumberField(TEXT("returned_count"), ReturnedCount);
+		Result->SetNumberField(TEXT("total_matches"), TotalMatches);
+		Result->SetBoolField(TEXT("truncated"), bTruncated);
+		Result->SetBoolField(TEXT("context_filtered"), bHasBlueprintPath);
+		if (Blueprint)
+		{
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		}
+		if (Graph)
+		{
+			Result->SetObjectField(TEXT("graph"), BuildGraphJson(Blueprint, Graph));
+		}
+		Result->SetStringField(TEXT("schema_class"), GraphSchema ? GraphSchema->GetClass()->GetPathName() : TEXT(""));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleSetNodeProperty(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphName = TEXT("EventGraph");
+	FString NodeId;
+	FString PropertyName;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("property_name"), PropertyName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'property_name'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	const TSharedPtr<FJsonValue>* ValuePtr = Request.Params->Values.Find(TEXT("value"));
+	if (!ValuePtr || !ValuePtr->IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'value'"));
+	}
+	const TSharedPtr<FJsonValue> ValueJson = *ValuePtr;
+
+	auto Task = [BlueprintPath, GraphName, NodeId, PropertyName, ValueJson]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		auto JsonToString = [](const TSharedPtr<FJsonValue>& JsonValue, FString& OutString) -> bool
+		{
+			if (!JsonValue.IsValid())
+			{
+				return false;
+			}
+
+			switch (JsonValue->Type)
+			{
+				case EJson::String:
+					OutString = JsonValue->AsString();
+					return true;
+				case EJson::Number:
+					OutString = FString::SanitizeFloat(JsonValue->AsNumber());
+					return true;
+				case EJson::Boolean:
+					OutString = JsonValue->AsBool() ? TEXT("true") : TEXT("false");
+					return true;
+				case EJson::Null:
+					OutString = TEXT("");
+					return true;
+				default:
+					return false;
+			}
+		};
+
+		auto TryParseBoolString = [](const FString& InText, bool& OutValue) -> bool
+		{
+			const FString Normalized = InText.TrimStartAndEnd().ToLower();
+			if (Normalized == TEXT("true") || Normalized == TEXT("1") || Normalized == TEXT("yes"))
+			{
+				OutValue = true;
+				return true;
+			}
+			if (Normalized == TEXT("false") || Normalized == TEXT("0") || Normalized == TEXT("no"))
+			{
+				OutValue = false;
+				return true;
+			}
+			return false;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UEdGraph* Graph = ResolveGraph(Blueprint, GraphName);
+		if (!Graph)
+		{
+			return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		}
+
+		UEdGraphNode* Node = FindNodeById(Graph, NodeId);
+		if (!Node)
+		{
+			return Fail(TEXT("Could not resolve node by node_id"));
+		}
+
+		FProperty* Property = FindPropertyByNameCaseInsensitive(Node->GetClass(), PropertyName);
+		if (!Property)
+		{
+			return Fail(FString::Printf(TEXT("Property not found on node class %s: %s"), *Node->GetClass()->GetName(), *PropertyName));
+		}
+
+		Node->Modify();
+		void* PropertyValuePtr = Property->ContainerPtrToValuePtr<void>(Node);
+		bool bSetValue = false;
+		FString ParsedScalarValue;
+		JsonToString(ValueJson, ParsedScalarValue);
+
+		if (FBoolProperty* BoolProperty = CastField<FBoolProperty>(Property))
+		{
+			bool bBoolValue = false;
+			if (ValueJson->Type == EJson::Boolean)
+			{
+				bBoolValue = ValueJson->AsBool();
+				bSetValue = true;
+			}
+			else if (TryParseBoolString(ParsedScalarValue, bBoolValue))
+			{
+				bSetValue = true;
+			}
+
+			if (!bSetValue)
+			{
+				return Fail(FString::Printf(TEXT("Could not parse bool value for property '%s'"), *Property->GetName()));
+			}
+
+			BoolProperty->SetPropertyValue(PropertyValuePtr, bBoolValue);
+		}
+		else if (FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property))
+		{
+			UEnum* Enum = EnumProperty->GetEnum();
+			if (!Enum)
+			{
+				return Fail(FString::Printf(TEXT("Enum metadata unavailable for property '%s'"), *Property->GetName()));
+			}
+
+			int64 EnumValue = 0;
+			if (ValueJson->Type == EJson::Number)
+			{
+				EnumValue = static_cast<int64>(ValueJson->AsNumber());
+				bSetValue = true;
+			}
+			else
+			{
+				FString EnumName = ParsedScalarValue.TrimStartAndEnd();
+				if (!EnumName.IsEmpty())
+				{
+					int64 ResolvedValue = Enum->GetValueByNameString(EnumName);
+					if (ResolvedValue == INDEX_NONE)
+					{
+						const int32 LastColon = EnumName.Find(TEXT(":"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+						if (LastColon != INDEX_NONE && LastColon + 1 < EnumName.Len())
+						{
+							const FString ShortName = EnumName.RightChop(LastColon + 1);
+							ResolvedValue = Enum->GetValueByNameString(ShortName);
+						}
+					}
+					if (ResolvedValue != INDEX_NONE)
+					{
+						EnumValue = ResolvedValue;
+						bSetValue = true;
+					}
+				}
+			}
+
+			if (!bSetValue)
+			{
+				return Fail(FString::Printf(TEXT("Could not parse enum value for property '%s'"), *Property->GetName()));
+			}
+
+			EnumProperty->GetUnderlyingProperty()->SetIntPropertyValue(PropertyValuePtr, EnumValue);
+		}
+		else if (FByteProperty* ByteProperty = CastField<FByteProperty>(Property); ByteProperty && ByteProperty->Enum != nullptr)
+		{
+			int64 EnumValue = 0;
+			if (ValueJson->Type == EJson::Number)
+			{
+				EnumValue = static_cast<int64>(ValueJson->AsNumber());
+				bSetValue = true;
+			}
+			else
+			{
+				const FString EnumName = ParsedScalarValue.TrimStartAndEnd();
+				if (!EnumName.IsEmpty())
+				{
+					int64 ResolvedValue = ByteProperty->Enum->GetValueByNameString(EnumName);
+					if (ResolvedValue == INDEX_NONE)
+					{
+						const int32 LastColon = EnumName.Find(TEXT(":"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+						if (LastColon != INDEX_NONE && LastColon + 1 < EnumName.Len())
+						{
+							const FString ShortName = EnumName.RightChop(LastColon + 1);
+							ResolvedValue = ByteProperty->Enum->GetValueByNameString(ShortName);
+						}
+					}
+					if (ResolvedValue != INDEX_NONE)
+					{
+						EnumValue = ResolvedValue;
+						bSetValue = true;
+					}
+				}
+			}
+
+			if (!bSetValue)
+			{
+				return Fail(FString::Printf(TEXT("Could not parse enum value for property '%s'"), *Property->GetName()));
+			}
+
+			ByteProperty->SetPropertyValue(PropertyValuePtr, static_cast<uint8>(EnumValue));
+		}
+		else if (FNumericProperty* NumericProperty = CastField<FNumericProperty>(Property))
+		{
+			if (NumericProperty->IsFloatingPoint())
+			{
+				double NumericValue = 0.0;
+				if (ValueJson->Type == EJson::Number)
+				{
+					NumericValue = ValueJson->AsNumber();
+					bSetValue = true;
+				}
+				else
+				{
+					bSetValue = LexTryParseString(NumericValue, *ParsedScalarValue);
+				}
+
+				if (!bSetValue)
+				{
+					return Fail(FString::Printf(TEXT("Could not parse numeric value for property '%s'"), *Property->GetName()));
+				}
+
+				NumericProperty->SetFloatingPointPropertyValue(PropertyValuePtr, NumericValue);
+			}
+			else
+			{
+				int64 NumericValue = 0;
+				if (ValueJson->Type == EJson::Number)
+				{
+					NumericValue = static_cast<int64>(ValueJson->AsNumber());
+					bSetValue = true;
+				}
+				else
+				{
+					bSetValue = LexTryParseString(NumericValue, *ParsedScalarValue);
+				}
+
+				if (!bSetValue)
+				{
+					return Fail(FString::Printf(TEXT("Could not parse integer value for property '%s'"), *Property->GetName()));
+				}
+
+				NumericProperty->SetIntPropertyValue(PropertyValuePtr, NumericValue);
+			}
+		}
+		else if (FNameProperty* NameProperty = CastField<FNameProperty>(Property))
+		{
+			if (!JsonToString(ValueJson, ParsedScalarValue))
+			{
+				return Fail(FString::Printf(TEXT("Could not parse name value for property '%s'"), *Property->GetName()));
+			}
+
+			NameProperty->SetPropertyValue(PropertyValuePtr, FName(*ParsedScalarValue));
+			bSetValue = true;
+		}
+		else if (FStrProperty* StrProperty = CastField<FStrProperty>(Property))
+		{
+			if (!JsonToString(ValueJson, ParsedScalarValue))
+			{
+				return Fail(FString::Printf(TEXT("Could not parse string value for property '%s'"), *Property->GetName()));
+			}
+
+			StrProperty->SetPropertyValue(PropertyValuePtr, ParsedScalarValue);
+			bSetValue = true;
+		}
+		else if (FTextProperty* TextProperty = CastField<FTextProperty>(Property))
+		{
+			if (!JsonToString(ValueJson, ParsedScalarValue))
+			{
+				return Fail(FString::Printf(TEXT("Could not parse text value for property '%s'"), *Property->GetName()));
+			}
+
+			TextProperty->SetPropertyValue(PropertyValuePtr, FText::FromString(ParsedScalarValue));
+			bSetValue = true;
+		}
+		else if (FClassProperty* ClassProperty = CastField<FClassProperty>(Property))
+		{
+			UClass* LoadedClass = nullptr;
+			if (ValueJson->Type != EJson::Null)
+			{
+				if (!JsonToString(ValueJson, ParsedScalarValue))
+				{
+					return Fail(FString::Printf(TEXT("Class property '%s' requires a class name/path string"), *Property->GetName()));
+				}
+				LoadedClass = ResolveClassByNameOrPath(ParsedScalarValue.TrimStartAndEnd());
+				if (!LoadedClass)
+				{
+					return Fail(FString::Printf(TEXT("Class not found for property '%s': %s"), *Property->GetName(), *ParsedScalarValue));
+				}
+				if (ClassProperty->MetaClass && !LoadedClass->IsChildOf(ClassProperty->MetaClass))
+				{
+					return Fail(FString::Printf(TEXT("Class '%s' is not a child of '%s' for property '%s'"), *LoadedClass->GetPathName(), *ClassProperty->MetaClass->GetPathName(), *Property->GetName()));
+				}
+			}
+
+			ClassProperty->SetPropertyValue(PropertyValuePtr, LoadedClass);
+			bSetValue = true;
+		}
+		else if (FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
+		{
+			UObject* LoadedObject = nullptr;
+			if (ValueJson->Type != EJson::Null)
+			{
+				if (!JsonToString(ValueJson, ParsedScalarValue))
+				{
+					return Fail(FString::Printf(TEXT("Object property '%s' requires an object path string"), *Property->GetName()));
+				}
+
+				const FString ObjectPath = ParsedScalarValue.TrimStartAndEnd();
+				if (!ObjectPath.IsEmpty() && !ObjectPath.Equals(TEXT("None"), ESearchCase::IgnoreCase))
+				{
+					LoadedObject = StaticLoadObject(ObjectProperty->PropertyClass, nullptr, *ObjectPath);
+					if (!LoadedObject)
+					{
+						LoadedObject = FindObject<UObject>(nullptr, *ObjectPath);
+					}
+					if (!LoadedObject)
+					{
+						return Fail(FString::Printf(TEXT("Object not found for property '%s': %s"), *Property->GetName(), *ObjectPath));
+					}
+					if (!LoadedObject->IsA(ObjectProperty->PropertyClass))
+					{
+						return Fail(FString::Printf(TEXT("Object '%s' is not of expected class '%s'"), *LoadedObject->GetPathName(), *ObjectProperty->PropertyClass->GetPathName()));
+					}
+				}
+			}
+
+			ObjectProperty->SetObjectPropertyValue(PropertyValuePtr, LoadedObject);
+			bSetValue = true;
+		}
+
+		if (!bSetValue)
+		{
+			if (!JsonToString(ValueJson, ParsedScalarValue))
+			{
+				return Fail(FString::Printf(TEXT("Property '%s' requires an Unreal import-text string for this type"), *Property->GetName()));
+			}
+
+			const TCHAR* ImportEnd = Property->ImportText_Direct(*ParsedScalarValue, PropertyValuePtr, Node, PPF_None);
+			if (ImportEnd == nullptr)
+			{
+				return Fail(FString::Printf(TEXT("Failed to parse import-text value for property '%s'"), *Property->GetName()));
+			}
+		}
+
+		if (UK2Node_Timeline* TimelineNode = Cast<UK2Node_Timeline>(Node))
+		{
+			UTimelineTemplate* TimelineTemplate = nullptr;
+			for (UTimelineTemplate* CandidateTemplate : Blueprint->Timelines)
+			{
+				if (CandidateTemplate && CandidateTemplate->GetVariableName() == TimelineNode->TimelineName)
+				{
+					TimelineTemplate = CandidateTemplate;
+					break;
+				}
+			}
+
+			if (TimelineTemplate)
+			{
+				const FString NormalizedPropertyName = Property->GetName().ToLower();
+
+				if (NormalizedPropertyName == TEXT("bautoplay"))
+				{
+					TimelineTemplate->Modify();
+					TimelineTemplate->bAutoPlay = TimelineNode->bAutoPlay;
+				}
+				else if (NormalizedPropertyName == TEXT("bloop"))
+				{
+					TimelineTemplate->Modify();
+					TimelineTemplate->bLoop = TimelineNode->bLoop;
+				}
+				else if (NormalizedPropertyName == TEXT("breplicated"))
+				{
+					TimelineTemplate->Modify();
+					TimelineTemplate->bReplicated = TimelineNode->bReplicated;
+				}
+				else if (NormalizedPropertyName == TEXT("bignoretimedilation"))
+				{
+					TimelineTemplate->Modify();
+					TimelineTemplate->bIgnoreTimeDilation = TimelineNode->bIgnoreTimeDilation;
+				}
+			}
+		}
+
+		Node->ReconstructNode();
+
+		if (const UK2Node* K2Node = Cast<UK2Node>(Node); K2Node && K2Node->NodeCausesStructuralBlueprintChange())
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+		else
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		}
+
+		FString ExportedValue;
+		Property->ExportTextItem_Direct(ExportedValue, PropertyValuePtr, nullptr, Node, PPF_None);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("graph_name"), Graph->GetName());
+		Result->SetStringField(TEXT("node_id"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+		Result->SetStringField(TEXT("property_name"), Property->GetName());
+		Result->SetStringField(TEXT("property_type"), Property->GetClass()->GetName());
+		Result->SetStringField(TEXT("value"), ExportedValue);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleAddTimeline(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString TimelineName;
+	FString GraphName = TEXT("EventGraph");
+	bool bSpawnNode = true;
+	int32 NodeX = 0;
+	int32 NodeY = 0;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("timeline_name"), TimelineName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'timeline_name'"));
+	}
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+	Request.Params->TryGetBoolField(TEXT("spawn_node"), bSpawnNode);
+	Request.Params->TryGetNumberField(TEXT("x"), NodeX);
+	Request.Params->TryGetNumberField(TEXT("y"), NodeY);
+
+	auto Task = [BlueprintPath, TimelineName, GraphName, bSpawnNode, NodeX, NodeY]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedTimelineName = TimelineName.TrimStartAndEnd();
+		if (TrimmedTimelineName.IsEmpty())
+		{
+			return Fail(TEXT("timeline_name must be non-empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		const FName TimelineVarName(*TrimmedTimelineName);
+		for (UTimelineTemplate* ExistingTimeline : Blueprint->Timelines)
+		{
+			if (ExistingTimeline && ExistingTimeline->GetVariableName() == TimelineVarName)
+			{
+				return Fail(FString::Printf(TEXT("Timeline already exists: %s"), *TrimmedTimelineName));
+			}
+		}
+
+		UTimelineTemplate* TimelineTemplate = FBlueprintEditorUtils::AddNewTimeline(Blueprint, TimelineVarName);
+		if (!TimelineTemplate)
+		{
+			return Fail(FString::Printf(TEXT("Failed to create timeline: %s"), *TrimmedTimelineName));
+		}
+
+		UK2Node_Timeline* TimelineNode = nullptr;
+		bool bCreatedNode = false;
+		UEdGraph* Graph = nullptr;
+		if (bSpawnNode)
+		{
+			Graph = ResolveGraph(Blueprint, GraphName);
+			if (!Graph)
+			{
+				return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+			}
+
+			TimelineNode = FBlueprintEditorUtils::FindNodeForTimeline(Blueprint, TimelineTemplate);
+			if (!TimelineNode)
+			{
+				FGraphNodeCreator<UK2Node_Timeline> TimelineCreator(*Graph);
+				TimelineNode = TimelineCreator.CreateNode();
+				if (!TimelineNode)
+				{
+					return Fail(TEXT("Failed to create timeline node"));
+				}
+
+				TimelineNode->TimelineName = TimelineTemplate->GetVariableName();
+				TimelineNode->NodePosX = NodeX;
+				TimelineNode->NodePosY = NodeY;
+				TimelineCreator.Finalize();
+				TimelineNode->ReconstructNode();
+				bCreatedNode = true;
+			}
+			else
+			{
+				TimelineNode->Modify();
+				TimelineNode->NodePosX = NodeX;
+				TimelineNode->NodePosY = NodeY;
+			}
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("timeline_name"), TimelineTemplate->GetVariableName().ToString());
+		Result->SetStringField(TEXT("timeline_template_path"), TimelineTemplate->GetPathName());
+		Result->SetBoolField(TEXT("spawned_node"), bSpawnNode);
+		Result->SetBoolField(TEXT("created_node"), bCreatedNode);
+		if (Graph)
+		{
+			Result->SetStringField(TEXT("graph_name"), Graph->GetName());
+		}
+		if (TimelineNode)
+		{
+			Result->SetObjectField(TEXT("node"), BuildNodeJson(TimelineNode));
+		}
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleListLatentActions(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString GraphNameFilter;
+	const bool bFilterByGraph = Request.Params->TryGetStringField(TEXT("graph_name"), GraphNameFilter);
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+
+	auto Task = [BlueprintPath, bFilterByGraph, GraphNameFilter]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		TArray<UEdGraph*> Graphs;
+		if (bFilterByGraph)
+		{
+			UEdGraph* Graph = ResolveGraph(Blueprint, GraphNameFilter);
+			if (!Graph)
+			{
+				return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphNameFilter));
+			}
+			Graphs.Add(Graph);
+		}
+		else
+		{
+			Blueprint->GetAllGraphs(Graphs);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> LatentNodesJson;
+		for (UEdGraph* Graph : Graphs)
+		{
+			if (!Graph)
+			{
+				continue;
+			}
+
+			for (UEdGraphNode* Node : Graph->Nodes)
+			{
+				if (!Node)
+				{
+					continue;
+				}
+
+				FString LatentKind;
+				FString LatentName;
+				bool bIsLatent = false;
+				bool bIsAsyncNode = false;
+
+				if (const UK2Node_CallFunction* CallFunctionNode = Cast<UK2Node_CallFunction>(Node))
+				{
+					if (const UFunction* TargetFunction = CallFunctionNode->GetTargetFunction())
+					{
+						if (TargetFunction->HasMetaData(FBlueprintMetadata::MD_Latent))
+						{
+							bIsLatent = true;
+							LatentKind = TEXT("function");
+							LatentName = TargetFunction->GetPathName();
+						}
+					}
+
+					if (Cast<UK2Node_BaseAsyncTask>(Node) != nullptr)
+					{
+						bIsLatent = true;
+						bIsAsyncNode = true;
+						LatentKind = TEXT("async_task");
+						if (LatentName.IsEmpty())
+						{
+							LatentName = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
+						}
+					}
+				}
+				else if (const UK2Node_Timeline* TimelineNode = Cast<UK2Node_Timeline>(Node))
+				{
+					bIsLatent = true;
+					LatentKind = TEXT("timeline");
+					LatentName = TimelineNode->TimelineName.ToString();
+				}
+
+				if (!bIsLatent)
+				{
+					continue;
+				}
+
+				TArray<TSharedPtr<FJsonValue>> ExecInputsJson;
+				TArray<TSharedPtr<FJsonValue>> ExecOutputsJson;
+				for (const UEdGraphPin* Pin : Node->Pins)
+				{
+					if (!Pin || Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec)
+					{
+						continue;
+					}
+
+					if (Pin->Direction == EGPD_Input)
+					{
+						ExecInputsJson.Add(MakeShared<FJsonValueString>(Pin->PinName.ToString()));
+					}
+					else if (Pin->Direction == EGPD_Output)
+					{
+						ExecOutputsJson.Add(MakeShared<FJsonValueString>(Pin->PinName.ToString()));
+					}
+				}
+
+				TSharedPtr<FJsonObject> NodeObj = BuildNodeJson(Node);
+				NodeObj->SetStringField(TEXT("graph_name"), Graph->GetName());
+				NodeObj->SetStringField(TEXT("graph_type"), GraphTypeToString(GetBlueprintGraphType(Blueprint, Graph)));
+				NodeObj->SetStringField(TEXT("latent_kind"), LatentKind);
+				NodeObj->SetStringField(TEXT("latent_name"), LatentName);
+				NodeObj->SetBoolField(TEXT("is_async"), bIsAsyncNode);
+				NodeObj->SetBoolField(TEXT("requires_exec_input"), ExecInputsJson.Num() > 0);
+				NodeObj->SetArrayField(TEXT("exec_inputs"), ExecInputsJson);
+				NodeObj->SetArrayField(TEXT("exec_outputs"), ExecOutputsJson);
+
+				LatentNodesJson.Add(MakeShared<FJsonValueObject>(NodeObj));
+			}
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetBoolField(TEXT("graph_filtered"), bFilterByGraph);
+		if (bFilterByGraph)
+		{
+			Result->SetStringField(TEXT("graph_name"), GraphNameFilter);
+		}
+		Result->SetArrayField(TEXT("latent_nodes"), LatentNodesJson);
+		Result->SetNumberField(TEXT("count"), LatentNodesJson.Num());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleFixupRedirectorsAndReferences(const FMCPRequest& Request)
+{
+	FString RootPath = TEXT("/Game");
+	bool bCheckoutDialogPrompt = false;
+	bool bDeleteFixedUpRedirectors = true;
+	bool bRefreshBlueprints = true;
+	bool bCompileBlueprints = false;
+
+	if (Request.Params.IsValid())
+	{
+		Request.Params->TryGetStringField(TEXT("root_path"), RootPath);
+		Request.Params->TryGetBoolField(TEXT("checkout_dialog_prompt"), bCheckoutDialogPrompt);
+		Request.Params->TryGetBoolField(TEXT("delete_fixed_up_redirectors"), bDeleteFixedUpRedirectors);
+		Request.Params->TryGetBoolField(TEXT("refresh_blueprints"), bRefreshBlueprints);
+		Request.Params->TryGetBoolField(TEXT("compile_blueprints"), bCompileBlueprints);
+	}
+
+	RootPath = RootPath.TrimStartAndEnd();
+	if (RootPath.IsEmpty())
+	{
+		RootPath = TEXT("/Game");
+	}
+	if (!RootPath.StartsWith(TEXT("/")))
+	{
+		RootPath = FString::Printf(TEXT("/%s"), *RootPath);
+	}
+
+	auto Task = [RootPath, bCheckoutDialogPrompt, bDeleteFixedUpRedirectors, bRefreshBlueprints, bCompileBlueprints]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+
+		IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+
+		FARFilter RedirectorFilter;
+		RedirectorFilter.PackagePaths.Add(FName(*RootPath));
+		RedirectorFilter.ClassPaths.Add(UObjectRedirector::StaticClass()->GetClassPathName());
+		RedirectorFilter.bRecursivePaths = true;
+
+		TArray<FAssetData> RedirectorAssets;
+		AssetRegistry.GetAssets(RedirectorFilter, RedirectorAssets);
+
+		TArray<UObjectRedirector*> Redirectors;
+		Redirectors.Reserve(RedirectorAssets.Num());
+		for (const FAssetData& AssetData : RedirectorAssets)
+		{
+			if (UObjectRedirector* Redirector = Cast<UObjectRedirector>(AssetData.GetAsset()))
+			{
+				Redirectors.Add(Redirector);
+			}
+		}
+
+		if (Redirectors.Num() > 0)
+		{
+			IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+			const ERedirectFixupMode FixupMode = bDeleteFixedUpRedirectors
+				? ERedirectFixupMode::DeleteFixedUpRedirectors
+				: ERedirectFixupMode::LeaveFixedUpRedirectors;
+			AssetTools.FixupReferencers(Redirectors, bCheckoutDialogPrompt, FixupMode);
+		}
+
+		int32 RefreshedBlueprints = 0;
+		int32 CompiledBlueprints = 0;
+		if (bRefreshBlueprints || bCompileBlueprints)
+		{
+			for (TObjectIterator<UBlueprint> It; It; ++It)
+			{
+				UBlueprint* Blueprint = *It;
+				if (!Blueprint || !Blueprint->GetPathName().StartsWith(RootPath))
+				{
+					continue;
+				}
+
+				if (bRefreshBlueprints)
+				{
+					FBlueprintEditorUtils::RefreshAllNodes(Blueprint);
+					++RefreshedBlueprints;
+				}
+
+				if (bCompileBlueprints)
+				{
+					FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, nullptr);
+					++CompiledBlueprints;
+				}
+			}
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("root_path"), RootPath);
+		Result->SetNumberField(TEXT("redirector_asset_count"), RedirectorAssets.Num());
+		Result->SetNumberField(TEXT("redirector_loaded_count"), Redirectors.Num());
+		Result->SetBoolField(TEXT("checkout_dialog_prompt"), bCheckoutDialogPrompt);
+		Result->SetBoolField(TEXT("delete_fixed_up_redirectors"), bDeleteFixedUpRedirectors);
+		Result->SetNumberField(TEXT("refreshed_blueprints"), RefreshedBlueprints);
+		Result->SetNumberField(TEXT("compiled_blueprints"), CompiledBlueprints);
 		return Result;
 	};
 

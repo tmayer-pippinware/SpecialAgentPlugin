@@ -84,6 +84,11 @@ private:
 	FMCPResponse HandleAddVariableGetNode(const FMCPRequest& Request);
 	FMCPResponse HandleAddVariableSetNode(const FMCPRequest& Request);
 	FMCPResponse HandleAddNodeByClass(const FMCPRequest& Request);
+	FMCPResponse HandleListNodeClasses(const FMCPRequest& Request);
+	FMCPResponse HandleSetNodeProperty(const FMCPRequest& Request);
+	FMCPResponse HandleAddTimeline(const FMCPRequest& Request);
+	FMCPResponse HandleListLatentActions(const FMCPRequest& Request);
+	FMCPResponse HandleFixupRedirectorsAndReferences(const FMCPRequest& Request);
 	FMCPResponse HandleAddCustomEventNode(const FMCPRequest& Request);
 	FMCPResponse HandleAddCommentNode(const FMCPRequest& Request);
 	FMCPResponse HandleAddRerouteNode(const FMCPRequest& Request);

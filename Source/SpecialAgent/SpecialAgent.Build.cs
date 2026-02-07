@@ -43,6 +43,7 @@ public class SpecialAgent : ModuleRules
 			new string[]
 			{
 				"UnrealEd",
+				"AssetTools",
 				"AssetRegistry",
 				"EditorSubsystem",
 				"LevelEditor",

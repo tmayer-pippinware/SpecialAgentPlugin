@@ -113,6 +113,11 @@ Native Blueprint graph tools for node-based authoring workflows:
 - `blueprint/create_event_dispatcher`
 - `blueprint/set_dispatcher_signature`
 - `blueprint/add_node_by_class`
+- `blueprint/list_node_classes`
+- `blueprint/set_node_property`
+- `blueprint/add_timeline`
+- `blueprint/list_latent_actions`
+- `blueprint/fixup_redirectors_and_references`
 - `blueprint/add_custom_event_node`
 - `blueprint/add_comment_node`
 - `blueprint/add_reroute_node`
