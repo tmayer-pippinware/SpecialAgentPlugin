@@ -479,6 +479,152 @@ namespace
 		return FString::Printf(TEXT("Output%d"), OutputIndex);
 	}
 
+	static uint64 GetVirtualInputValueTypeMask(const FProperty* Property)
+	{
+		if (!Property)
+		{
+			return static_cast<uint64>(MCT_Unknown);
+		}
+
+		if (Property->IsA<FFloatProperty>() || Property->IsA<FDoubleProperty>())
+		{
+			return static_cast<uint64>(MCT_Float1);
+		}
+
+		const FStructProperty* StructProperty = CastField<FStructProperty>(Property);
+		if (!StructProperty || !StructProperty->Struct)
+		{
+			return static_cast<uint64>(MCT_Unknown);
+		}
+
+		if (StructProperty->Struct == TBaseStructure<FVector2D>::Get() || StructProperty->Struct->GetFName() == TEXT("Vector2f"))
+		{
+			return static_cast<uint64>(MCT_Float2);
+		}
+		if (StructProperty->Struct == TBaseStructure<FVector>::Get() || StructProperty->Struct->GetFName() == TEXT("Vector3f"))
+		{
+			return static_cast<uint64>(MCT_Float3);
+		}
+		if (StructProperty->Struct == TBaseStructure<FLinearColor>::Get() || StructProperty->Struct == TBaseStructure<FVector4>::Get() || StructProperty->Struct->GetFName() == TEXT("Vector4f"))
+		{
+			return static_cast<uint64>(MCT_Float4);
+		}
+
+		return static_cast<uint64>(MCT_Unknown);
+	}
+
+	static FString GetVirtualInputPinDisplayName(const FProperty* Property)
+	{
+		if (!Property)
+		{
+			return FString();
+		}
+
+		const FString DisplayName = Property->GetMetaData(TEXT("DisplayName"));
+		return DisplayName.IsEmpty() ? Property->GetName() : DisplayName;
+	}
+
+	static FString ExportVirtualInputDefaultValue(UMaterialExpression* Node, FProperty* Property)
+	{
+		if (!Node || !Property)
+		{
+			return FString();
+		}
+
+		FString ExportedValue;
+		const void* PropertyValuePtr = Property->ContainerPtrToValuePtr<void>(Node);
+		if (PropertyValuePtr)
+		{
+			Property->ExportTextItem_Direct(ExportedValue, PropertyValuePtr, nullptr, Node, PPF_None);
+		}
+		return ExportedValue;
+	}
+
+	static void GatherVirtualInputProperties(UMaterialExpression* Node, TArray<FProperty*>& OutProperties)
+	{
+		OutProperties.Reset();
+		if (!Node)
+		{
+			return;
+		}
+
+		for (TFieldIterator<FProperty> PropertyIt(Node->GetClass(), EFieldIteratorFlags::IncludeSuper); PropertyIt; ++PropertyIt)
+		{
+			FProperty* Property = *PropertyIt;
+			if (!Property || Property->HasAnyPropertyFlags(CPF_Deprecated))
+			{
+				continue;
+			}
+			if (Property->GetMetaData(TEXT("ShowAsInputPin")).IsEmpty())
+			{
+				continue;
+			}
+			OutProperties.Add(Property);
+		}
+	}
+
+	static bool TryResolveVirtualInputProperty(
+		UMaterialExpression* Node,
+		const FString& PinName,
+		const bool bHasPinIndex,
+		const int32 PinIndex,
+		FProperty*& OutProperty,
+		int32& OutPropertyIndex,
+		FString& OutError)
+	{
+		OutProperty = nullptr;
+		OutPropertyIndex = INDEX_NONE;
+
+		TArray<FProperty*> VirtualInputProperties;
+		GatherVirtualInputProperties(Node, VirtualInputProperties);
+		if (VirtualInputProperties.Num() == 0)
+		{
+			OutError = FString::Printf(TEXT("Node has no editable virtual input pins: %s"), Node ? *Node->GetName() : TEXT("<invalid>"));
+			return false;
+		}
+
+		if (bHasPinIndex)
+		{
+			if (!VirtualInputProperties.IsValidIndex(PinIndex))
+			{
+				OutError = FString::Printf(TEXT("Input pin index out of range: %d"), PinIndex);
+				return false;
+			}
+
+			OutProperty = VirtualInputProperties[PinIndex];
+			OutPropertyIndex = PinIndex;
+			return true;
+		}
+
+		const FString TrimmedName = PinName.TrimStartAndEnd();
+		if (!TrimmedName.IsEmpty())
+		{
+			for (int32 PropertyIndex = 0; PropertyIndex < VirtualInputProperties.Num(); ++PropertyIndex)
+			{
+				FProperty* Property = VirtualInputProperties[PropertyIndex];
+				if (!Property)
+				{
+					continue;
+				}
+
+				if (Property->GetName().Equals(TrimmedName, ESearchCase::IgnoreCase) ||
+					GetVirtualInputPinDisplayName(Property).Equals(TrimmedName, ESearchCase::IgnoreCase))
+				{
+					OutProperty = Property;
+					OutPropertyIndex = PropertyIndex;
+					return true;
+				}
+			}
+
+			OutError = FString::Printf(TEXT("Input pin not found: %s"), *TrimmedName);
+			return false;
+		}
+
+		OutProperty = VirtualInputProperties[0];
+		OutPropertyIndex = 0;
+		return true;
+	}
+
 	static bool TryResolveInputPinIndex(
 		UMaterialExpression* Node,
 		const FString& PinName,
@@ -676,6 +822,40 @@ namespace
 		if (bIncludeDefaultValue)
 		{
 			Pin->SetStringField(TEXT("default_value"), Node ? Node->GetInputPinDefaultValue(InputIndex) : FString());
+		}
+
+		return Pin;
+	}
+
+	static TSharedPtr<FJsonObject> BuildVirtualInputPinJson(UMaterialExpression* Node, int32 InputIndex, FProperty* Property, bool bIncludeDefaultValue)
+	{
+		TSharedPtr<FJsonObject> Pin = MakeShared<FJsonObject>();
+		Pin->SetStringField(TEXT("pin_direction"), TEXT("input"));
+		Pin->SetNumberField(TEXT("pin_index"), InputIndex);
+		Pin->SetStringField(TEXT("pin_name"), GetVirtualInputPinDisplayName(Property));
+
+		const uint64 ValueTypeMask = GetVirtualInputValueTypeMask(Property);
+		Pin->SetNumberField(TEXT("value_type_mask"), static_cast<double>(ValueTypeMask));
+		Pin->SetStringField(TEXT("value_type"), MaterialValueTypeToString(ValueTypeMask));
+
+		Pin->SetBoolField(TEXT("connected"), false);
+		Pin->SetBoolField(TEXT("virtual_input_pin"), true);
+		Pin->SetBoolField(TEXT("mask_enabled"), false);
+		Pin->SetNumberField(TEXT("mask"), 0);
+		Pin->SetNumberField(TEXT("mask_r"), 0);
+		Pin->SetNumberField(TEXT("mask_g"), 0);
+		Pin->SetNumberField(TEXT("mask_b"), 0);
+		Pin->SetNumberField(TEXT("mask_a"), 0);
+
+		if (Property)
+		{
+			Pin->SetStringField(TEXT("property_name"), Property->GetName());
+			Pin->SetStringField(TEXT("property_cpp_type"), Property->GetCPPType());
+		}
+
+		if (bIncludeDefaultValue)
+		{
+			Pin->SetStringField(TEXT("default_value"), ExportVirtualInputDefaultValue(Node, Property));
 		}
 
 		return Pin;
@@ -4129,6 +4309,16 @@ FMCPResponse FMaterialService::HandleListNodePins(const FMCPRequest& Request)
 			InputPins.Add(MakeShared<FJsonValueObject>(BuildInputPinJson(Node, InputIndex, Input, bIncludeDefaultValues)));
 		}
 
+		if (InputPins.Num() == 0)
+		{
+			TArray<FProperty*> VirtualInputProperties;
+			GatherVirtualInputProperties(Node, VirtualInputProperties);
+			for (int32 VirtualInputIndex = 0; VirtualInputIndex < VirtualInputProperties.Num(); ++VirtualInputIndex)
+			{
+				InputPins.Add(MakeShared<FJsonValueObject>(BuildVirtualInputPinJson(Node, VirtualInputIndex, VirtualInputProperties[VirtualInputIndex], bIncludeDefaultValues)));
+			}
+		}
+
 		TArray<TSharedPtr<FJsonValue>> OutputPins;
 		for (int32 OutputIndex = 0;; ++OutputIndex)
 		{
@@ -4755,49 +4945,87 @@ FMCPResponse FMaterialService::HandleSetPinDefaultValue(const FMCPRequest& Reque
 		}
 
 		int32 ResolvedInputIndex = INDEX_NONE;
-		if (!TryResolveInputPinIndex(Node, InputPinName, bHasInputIndex, InputIndex, ResolvedInputIndex, Error))
+		FExpressionInput* Input = nullptr;
+		FProperty* VirtualInputProperty = nullptr;
+		bool bUsingVirtualInput = false;
+
+		if (TryResolveInputPinIndex(Node, InputPinName, bHasInputIndex, InputIndex, ResolvedInputIndex, Error))
 		{
-			return MakeFailure(Error);
+			Input = Node->GetInput(ResolvedInputIndex);
+			if (!Input)
+			{
+				return MakeFailure(FString::Printf(TEXT("Input pin index out of range: %d"), ResolvedInputIndex));
+			}
+		}
+		else
+		{
+			if (Node->GetInput(0) != nullptr || !TryResolveVirtualInputProperty(Node, InputPinName, bHasInputIndex, InputIndex, VirtualInputProperty, ResolvedInputIndex, Error))
+			{
+				return MakeFailure(Error);
+			}
+
+			bUsingVirtualInput = true;
 		}
 
-		FExpressionInput* Input = Node->GetInput(ResolvedInputIndex);
-		if (!Input)
-		{
-			return MakeFailure(FString::Printf(TEXT("Input pin index out of range: %d"), ResolvedInputIndex));
-		}
+		const FString ResolvedInputName = bUsingVirtualInput
+			? GetVirtualInputPinDisplayName(VirtualInputProperty)
+			: GetInputPinDisplayName(Node, ResolvedInputIndex, Input);
 
 		Node->Modify();
 		bool bApplied = false;
-		for (FProperty* Property : Node->GetInputPinProperty(ResolvedInputIndex))
+		if (bUsingVirtualInput)
 		{
-			if (!Property)
-			{
-				continue;
-			}
-
-			void* PropertyValuePtr = Property->ContainerPtrToValuePtr<void>(Node);
-			if (PropertyValuePtr && Property->ImportText_Direct(*DefaultValue, PropertyValuePtr, Node, PPF_None))
+			void* PropertyValuePtr = VirtualInputProperty ? VirtualInputProperty->ContainerPtrToValuePtr<void>(Node) : nullptr;
+			if (PropertyValuePtr && VirtualInputProperty->ImportText_Direct(*DefaultValue, PropertyValuePtr, Node, PPF_None))
 			{
 				bApplied = true;
+			}
+		}
+		else
+		{
+			for (FProperty* Property : Node->GetInputPinProperty(ResolvedInputIndex))
+			{
+				if (!Property)
+				{
+					continue;
+				}
+
+				void* PropertyValuePtr = Property->ContainerPtrToValuePtr<void>(Node);
+				if (PropertyValuePtr && Property->ImportText_Direct(*DefaultValue, PropertyValuePtr, Node, PPF_None))
+				{
+					bApplied = true;
+				}
 			}
 		}
 
 		if (!bApplied)
 		{
-			return MakeFailure(FString::Printf(TEXT("Could not apply default value '%s' to input pin '%s'"), *DefaultValue, *GetInputPinDisplayName(Node, ResolvedInputIndex, Input)));
+			return MakeFailure(FString::Printf(TEXT("Could not apply default value '%s' to input pin '%s'"), *DefaultValue, *ResolvedInputName));
 		}
 
 		Context.MarkDirty();
+
+		const FString AppliedDefaultValue = bUsingVirtualInput
+			? ExportVirtualInputDefaultValue(Node, VirtualInputProperty)
+			: Node->GetInputPinDefaultValue(ResolvedInputIndex);
 
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetBoolField(TEXT("success"), true);
 		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
 		Result->SetStringField(TEXT("node_id"), GetNodeId(Node));
 		Result->SetNumberField(TEXT("input_index"), ResolvedInputIndex);
-		Result->SetStringField(TEXT("input_name"), GetInputPinDisplayName(Node, ResolvedInputIndex, Input));
+		Result->SetStringField(TEXT("input_name"), ResolvedInputName);
 		Result->SetStringField(TEXT("requested_default_value"), DefaultValue);
-		Result->SetStringField(TEXT("applied_default_value"), Node->GetInputPinDefaultValue(ResolvedInputIndex));
-		Result->SetObjectField(TEXT("input_pin"), BuildInputPinJson(Node, ResolvedInputIndex, Input, true));
+		Result->SetStringField(TEXT("applied_default_value"), AppliedDefaultValue);
+		Result->SetBoolField(TEXT("virtual_input_pin"), bUsingVirtualInput);
+		if (bUsingVirtualInput)
+		{
+			Result->SetObjectField(TEXT("input_pin"), BuildVirtualInputPinJson(Node, ResolvedInputIndex, VirtualInputProperty, true));
+		}
+		else
+		{
+			Result->SetObjectField(TEXT("input_pin"), BuildInputPinJson(Node, ResolvedInputIndex, Input, true));
+		}
 		return Result;
 	};
 
@@ -4854,16 +5082,31 @@ FMCPResponse FMaterialService::HandleResetPinDefaultValue(const FMCPRequest& Req
 		}
 
 		int32 ResolvedInputIndex = INDEX_NONE;
-		if (!TryResolveInputPinIndex(Node, InputPinName, bHasInputIndex, InputIndex, ResolvedInputIndex, Error))
+		FExpressionInput* Input = nullptr;
+		FProperty* VirtualInputProperty = nullptr;
+		bool bUsingVirtualInput = false;
+
+		if (TryResolveInputPinIndex(Node, InputPinName, bHasInputIndex, InputIndex, ResolvedInputIndex, Error))
 		{
-			return MakeFailure(Error);
+			Input = Node->GetInput(ResolvedInputIndex);
+			if (!Input)
+			{
+				return MakeFailure(FString::Printf(TEXT("Input pin index out of range: %d"), ResolvedInputIndex));
+			}
+		}
+		else
+		{
+			if (Node->GetInput(0) != nullptr || !TryResolveVirtualInputProperty(Node, InputPinName, bHasInputIndex, InputIndex, VirtualInputProperty, ResolvedInputIndex, Error))
+			{
+				return MakeFailure(Error);
+			}
+
+			bUsingVirtualInput = true;
 		}
 
-		FExpressionInput* Input = Node->GetInput(ResolvedInputIndex);
-		if (!Input)
-		{
-			return MakeFailure(FString::Printf(TEXT("Input pin index out of range: %d"), ResolvedInputIndex));
-		}
+		const FString ResolvedInputName = bUsingVirtualInput
+			? GetVirtualInputPinDisplayName(VirtualInputProperty)
+			: GetInputPinDisplayName(Node, ResolvedInputIndex, Input);
 
 		UMaterialExpression* ClassDefaultObject = Node->GetClass()->GetDefaultObject<UMaterialExpression>();
 		if (!ClassDefaultObject)
@@ -4871,36 +5114,54 @@ FMCPResponse FMaterialService::HandleResetPinDefaultValue(const FMCPRequest& Req
 			return MakeFailure(TEXT("Failed to resolve class default object"));
 		}
 
-		const FString DefaultValue = ClassDefaultObject->GetInputPinDefaultValue(ResolvedInputIndex);
-
 		Node->Modify();
 		bool bCopiedProperties = false;
-		for (FProperty* Property : Node->GetInputPinProperty(ResolvedInputIndex))
+		if (bUsingVirtualInput)
 		{
-			if (!Property)
-			{
-				continue;
-			}
-
-			Property->CopyCompleteValue_InContainer(Node, ClassDefaultObject);
+			VirtualInputProperty->CopyCompleteValue_InContainer(Node, ClassDefaultObject);
 			bCopiedProperties = true;
+		}
+		else
+		{
+			for (FProperty* Property : Node->GetInputPinProperty(ResolvedInputIndex))
+			{
+				if (!Property)
+				{
+					continue;
+				}
+
+				Property->CopyCompleteValue_InContainer(Node, ClassDefaultObject);
+				bCopiedProperties = true;
+			}
 		}
 
 		if (!bCopiedProperties)
 		{
-			return MakeFailure(FString::Printf(TEXT("Input pin does not expose a resettable default value: %s"), *GetInputPinDisplayName(Node, ResolvedInputIndex, Input)));
+			return MakeFailure(FString::Printf(TEXT("Input pin does not expose a resettable default value: %s"), *ResolvedInputName));
 		}
 
 		Context.MarkDirty();
+
+		const FString ResetDefaultValue = bUsingVirtualInput
+			? ExportVirtualInputDefaultValue(Node, VirtualInputProperty)
+			: Node->GetInputPinDefaultValue(ResolvedInputIndex);
 
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetBoolField(TEXT("success"), true);
 		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
 		Result->SetStringField(TEXT("node_id"), GetNodeId(Node));
 		Result->SetNumberField(TEXT("input_index"), ResolvedInputIndex);
-		Result->SetStringField(TEXT("input_name"), GetInputPinDisplayName(Node, ResolvedInputIndex, Input));
-		Result->SetStringField(TEXT("reset_default_value"), Node->GetInputPinDefaultValue(ResolvedInputIndex));
-		Result->SetObjectField(TEXT("input_pin"), BuildInputPinJson(Node, ResolvedInputIndex, Input, true));
+		Result->SetStringField(TEXT("input_name"), ResolvedInputName);
+		Result->SetStringField(TEXT("reset_default_value"), ResetDefaultValue);
+		Result->SetBoolField(TEXT("virtual_input_pin"), bUsingVirtualInput);
+		if (bUsingVirtualInput)
+		{
+			Result->SetObjectField(TEXT("input_pin"), BuildVirtualInputPinJson(Node, ResolvedInputIndex, VirtualInputProperty, true));
+		}
+		else
+		{
+			Result->SetObjectField(TEXT("input_pin"), BuildInputPinJson(Node, ResolvedInputIndex, Input, true));
+		}
 		return Result;
 	};
 
