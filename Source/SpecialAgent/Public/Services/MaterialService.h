@@ -78,5 +78,12 @@ private:
 	FMCPResponse HandleMaterialFunctionAddCallNode(const FMCPRequest& Request);
 	FMCPResponse HandleMaterialFunctionSetIOTypes(const FMCPRequest& Request);
 	FMCPResponse HandleMaterialFunctionCompile(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialCollectionGetInfo(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialCollectionListParameters(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialCollectionAddScalar(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialCollectionAddVector(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialCollectionRemoveParameter(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialCollectionRenameParameter(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialCollectionSetDefaultValue(const FMCPRequest& Request);
 	FMCPResponse HandleCapabilities(const FMCPRequest& Request);
 };

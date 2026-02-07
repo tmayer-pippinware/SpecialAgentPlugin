@@ -2445,6 +2445,168 @@ namespace
 		return nullptr;
 	}
 
+	enum class ECollectionParameterKind : uint8
+	{
+		Unknown,
+		Scalar,
+		Vector
+	};
+
+	static FString CollectionParameterKindToString(const ECollectionParameterKind Kind)
+	{
+		switch (Kind)
+		{
+		case ECollectionParameterKind::Scalar:
+			return TEXT("scalar");
+		case ECollectionParameterKind::Vector:
+			return TEXT("vector");
+		default:
+			return TEXT("unknown");
+		}
+	}
+
+	static bool ParseOptionalCollectionParameterKind(
+		const TSharedPtr<FJsonObject>& Params,
+		ECollectionParameterKind& OutKind,
+		bool& bOutHasKind,
+		FString& OutError)
+	{
+		OutKind = ECollectionParameterKind::Unknown;
+		bOutHasKind = false;
+		if (!Params.IsValid())
+		{
+			return true;
+		}
+
+		FString KindString;
+		if (!Params->TryGetStringField(TEXT("parameter_type"), KindString) &&
+			!Params->TryGetStringField(TEXT("type"), KindString))
+		{
+			return true;
+		}
+
+		const FString Token = NormalizeParameterToken(KindString);
+		bOutHasKind = true;
+		if (Token == TEXT("scalar") || Token == TEXT("float") || Token == TEXT("float1"))
+		{
+			OutKind = ECollectionParameterKind::Scalar;
+			return true;
+		}
+		if (Token == TEXT("vector") || Token == TEXT("float4") || Token == TEXT("color"))
+		{
+			OutKind = ECollectionParameterKind::Vector;
+			return true;
+		}
+
+		OutError = FString::Printf(TEXT("Unsupported parameter_type '%s' (expected scalar or vector)"), *KindString);
+		return false;
+	}
+
+	static UMaterialParameterCollection* ResolveMaterialParameterCollectionAsset(const FString& InputPath, FString& OutAssetPath, FString& OutError)
+	{
+		OutAssetPath = NormalizeAssetPath(InputPath);
+		if (!FPackageName::IsValidLongPackageName(OutAssetPath))
+		{
+			OutError = FString::Printf(TEXT("Invalid parameter collection path: %s"), *InputPath);
+			return nullptr;
+		}
+
+		UMaterialParameterCollection* Collection = LoadAssetAs<UMaterialParameterCollection>(OutAssetPath);
+		if (!Collection)
+		{
+			OutError = FString::Printf(TEXT("Material parameter collection not found: %s"), *OutAssetPath);
+			return nullptr;
+		}
+
+		return Collection;
+	}
+
+	static int32 FindCollectionScalarParameterIndex(const UMaterialParameterCollection* Collection, const FString& ParameterName)
+	{
+		if (!Collection)
+		{
+			return INDEX_NONE;
+		}
+
+		for (int32 Index = 0; Index < Collection->ScalarParameters.Num(); ++Index)
+		{
+			if (Collection->ScalarParameters[Index].ParameterName.ToString().Equals(ParameterName, ESearchCase::IgnoreCase))
+			{
+				return Index;
+			}
+		}
+		return INDEX_NONE;
+	}
+
+	static int32 FindCollectionVectorParameterIndex(const UMaterialParameterCollection* Collection, const FString& ParameterName)
+	{
+		if (!Collection)
+		{
+			return INDEX_NONE;
+		}
+
+		for (int32 Index = 0; Index < Collection->VectorParameters.Num(); ++Index)
+		{
+			if (Collection->VectorParameters[Index].ParameterName.ToString().Equals(ParameterName, ESearchCase::IgnoreCase))
+			{
+				return Index;
+			}
+		}
+		return INDEX_NONE;
+	}
+
+	static TSharedPtr<FJsonObject> BuildCollectionScalarParameterJson(
+		const FCollectionScalarParameter& Parameter,
+		const FString& SourceCollectionPath = FString(),
+		const bool bInherited = false)
+	{
+		TSharedPtr<FJsonObject> ParameterObject = MakeShared<FJsonObject>();
+		ParameterObject->SetStringField(TEXT("parameter_type"), TEXT("scalar"));
+		ParameterObject->SetStringField(TEXT("parameter_name"), Parameter.ParameterName.ToString());
+		ParameterObject->SetNumberField(TEXT("default_value"), Parameter.DefaultValue);
+		ParameterObject->SetStringField(TEXT("id"), Parameter.Id.IsValid() ? Parameter.Id.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+		if (!SourceCollectionPath.IsEmpty())
+		{
+			ParameterObject->SetStringField(TEXT("source_collection_path"), SourceCollectionPath);
+		}
+		ParameterObject->SetBoolField(TEXT("is_inherited"), bInherited);
+		return ParameterObject;
+	}
+
+	static TSharedPtr<FJsonObject> BuildCollectionVectorParameterJson(
+		const FCollectionVectorParameter& Parameter,
+		const FString& SourceCollectionPath = FString(),
+		const bool bInherited = false)
+	{
+		TSharedPtr<FJsonObject> ParameterObject = MakeShared<FJsonObject>();
+		ParameterObject->SetStringField(TEXT("parameter_type"), TEXT("vector"));
+		ParameterObject->SetStringField(TEXT("parameter_name"), Parameter.ParameterName.ToString());
+		ParameterObject->SetObjectField(TEXT("default_value"), BuildColorJson(Parameter.DefaultValue));
+		ParameterObject->SetStringField(TEXT("id"), Parameter.Id.IsValid() ? Parameter.Id.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+		if (!SourceCollectionPath.IsEmpty())
+		{
+			ParameterObject->SetStringField(TEXT("source_collection_path"), SourceCollectionPath);
+		}
+		ParameterObject->SetBoolField(TEXT("is_inherited"), bInherited);
+		return ParameterObject;
+	}
+
+	static void GatherCollectionHierarchy(const UMaterialParameterCollection* Collection, TArray<const UMaterialParameterCollection*>& OutHierarchy)
+	{
+		OutHierarchy.Reset();
+		if (!Collection)
+		{
+			return;
+		}
+
+		const UMaterialParameterCollection* Current = Collection;
+		while (Current)
+		{
+			OutHierarchy.Insert(Current, 0);
+			Current = Current->GetBaseParameterCollection();
+		}
+	}
+
 	static void WriteMaterialSettings(const UMaterial* Material, const TSharedPtr<FJsonObject>& Result)
 	{
 		Result->SetStringField(TEXT("domain"), DomainToString(Material->MaterialDomain));
@@ -2551,6 +2713,13 @@ TArray<FMCPToolInfo> FMaterialService::GetAvailableTools() const
 	AddTool(TEXT("material_function/add_call_node"), TEXT("Add a material function call node to a material or material function graph."));
 	AddTool(TEXT("material_function/set_io_types"), TEXT("Set input/output value typing for a material function interface."));
 	AddTool(TEXT("material_function/compile"), TEXT("Compile/update a material function and dependent materials."));
+	AddTool(TEXT("material_collection/get_info"), TEXT("Get metadata and parameter counts for a material parameter collection."));
+	AddTool(TEXT("material_collection/list_parameters"), TEXT("List scalar/vector parameters in a material parameter collection."));
+	AddTool(TEXT("material_collection/add_scalar"), TEXT("Add a scalar parameter to a material parameter collection."));
+	AddTool(TEXT("material_collection/add_vector"), TEXT("Add a vector parameter to a material parameter collection."));
+	AddTool(TEXT("material_collection/remove_parameter"), TEXT("Remove a scalar or vector parameter from a material parameter collection."));
+	AddTool(TEXT("material_collection/rename_parameter"), TEXT("Rename a scalar or vector parameter in a material parameter collection."));
+	AddTool(TEXT("material_collection/set_default_value"), TEXT("Set a scalar or vector default value in a material parameter collection."));
 	AddTool(TEXT("capabilities"), TEXT("Report baseline material service capabilities and module availability."));
 	return Tools;
 }
@@ -2613,6 +2782,13 @@ FMCPResponse FMaterialService::HandleRequest(const FMCPRequest& Request, const F
 	if (MethodName == TEXT("material_function/add_call_node")) return HandleMaterialFunctionAddCallNode(Request);
 	if (MethodName == TEXT("material_function/set_io_types")) return HandleMaterialFunctionSetIOTypes(Request);
 	if (MethodName == TEXT("material_function/compile")) return HandleMaterialFunctionCompile(Request);
+	if (MethodName == TEXT("material_collection/get_info")) return HandleMaterialCollectionGetInfo(Request);
+	if (MethodName == TEXT("material_collection/list_parameters")) return HandleMaterialCollectionListParameters(Request);
+	if (MethodName == TEXT("material_collection/add_scalar")) return HandleMaterialCollectionAddScalar(Request);
+	if (MethodName == TEXT("material_collection/add_vector")) return HandleMaterialCollectionAddVector(Request);
+	if (MethodName == TEXT("material_collection/remove_parameter")) return HandleMaterialCollectionRemoveParameter(Request);
+	if (MethodName == TEXT("material_collection/rename_parameter")) return HandleMaterialCollectionRenameParameter(Request);
+	if (MethodName == TEXT("material_collection/set_default_value")) return HandleMaterialCollectionSetDefaultValue(Request);
 	if (MethodName == TEXT("capabilities")) return HandleCapabilities(Request);
 	return MethodNotFound(Request.Id, TEXT("material"), MethodName);
 }
@@ -7725,6 +7901,816 @@ FMCPResponse FMaterialService::HandleMaterialFunctionCompile(const FMCPRequest& 
 	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
 }
 
+FMCPResponse FMaterialService::HandleMaterialCollectionGetInfo(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString CollectionPath;
+	if (!Request.Params->TryGetStringField(TEXT("parameter_collection_path"), CollectionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), CollectionPath);
+	}
+	if (CollectionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_collection_path'"));
+	}
+
+	auto Task = [CollectionPath]() -> TSharedPtr<FJsonObject>
+	{
+		FString CollectionAssetPath;
+		FString Error;
+		UMaterialParameterCollection* Collection = ResolveMaterialParameterCollectionAsset(CollectionPath, CollectionAssetPath, Error);
+		if (!Collection)
+		{
+			return MakeFailure(Error);
+		}
+
+		TArray<const UMaterialParameterCollection*> Hierarchy;
+		GatherCollectionHierarchy(Collection, Hierarchy);
+
+		int32 AccessibleScalarCount = 0;
+		int32 AccessibleVectorCount = 0;
+		for (const UMaterialParameterCollection* Source : Hierarchy)
+		{
+			if (!Source)
+			{
+				continue;
+			}
+			AccessibleScalarCount += Source->ScalarParameters.Num();
+			AccessibleVectorCount += Source->VectorParameters.Num();
+		}
+
+		TArray<FName> ScalarNames = Collection->GetScalarParameterNames();
+		TArray<FName> VectorNames = Collection->GetVectorParameterNames();
+		TArray<TSharedPtr<FJsonValue>> ScalarNameArray;
+		TArray<TSharedPtr<FJsonValue>> VectorNameArray;
+		for (const FName Name : ScalarNames)
+		{
+			ScalarNameArray.Add(MakeShared<FJsonValueString>(Name.ToString()));
+		}
+		for (const FName Name : VectorNames)
+		{
+			VectorNameArray.Add(MakeShared<FJsonValueString>(Name.ToString()));
+		}
+
+		const int32 DirectScalarCount = Collection->ScalarParameters.Num();
+		const int32 DirectVectorCount = Collection->VectorParameters.Num();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("parameter_collection_path"), CollectionAssetPath);
+		Result->SetStringField(TEXT("asset_class"), Collection->GetClass()->GetPathName());
+		Result->SetBoolField(TEXT("has_base_collection"), Collection->GetBaseParameterCollection() != nullptr);
+		Result->SetStringField(TEXT("base_collection_path"), Collection->GetBaseParameterCollection() ? NormalizeAssetPath(Collection->GetBaseParameterCollection()->GetPathName()) : FString());
+		Result->SetStringField(TEXT("state_id"), Collection->StateId.IsValid() ? Collection->StateId.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+		Result->SetNumberField(TEXT("scalar_parameter_count"), DirectScalarCount);
+		Result->SetNumberField(TEXT("vector_parameter_count"), DirectVectorCount);
+		Result->SetNumberField(TEXT("parameter_count"), DirectScalarCount + DirectVectorCount);
+		Result->SetNumberField(TEXT("accessible_scalar_parameter_count"), AccessibleScalarCount);
+		Result->SetNumberField(TEXT("accessible_vector_parameter_count"), AccessibleVectorCount);
+		Result->SetNumberField(TEXT("accessible_parameter_count"), AccessibleScalarCount + AccessibleVectorCount);
+		Result->SetNumberField(TEXT("inherited_scalar_parameter_count"), AccessibleScalarCount - DirectScalarCount);
+		Result->SetNumberField(TEXT("inherited_vector_parameter_count"), AccessibleVectorCount - DirectVectorCount);
+		Result->SetNumberField(TEXT("total_vector_storage"), Collection->GetTotalVectorStorage());
+		Result->SetArrayField(TEXT("scalar_parameter_names"), ScalarNameArray);
+		Result->SetArrayField(TEXT("vector_parameter_names"), VectorNameArray);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialCollectionListParameters(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString CollectionPath;
+	if (!Request.Params->TryGetStringField(TEXT("parameter_collection_path"), CollectionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), CollectionPath);
+	}
+	if (CollectionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_collection_path'"));
+	}
+
+	bool bIncludeInherited = true;
+	Request.Params->TryGetBoolField(TEXT("include_inherited"), bIncludeInherited);
+
+	ECollectionParameterKind TypeFilter = ECollectionParameterKind::Unknown;
+	bool bHasTypeFilter = false;
+	FString TypeError;
+	if (!ParseOptionalCollectionParameterKind(Request.Params, TypeFilter, bHasTypeFilter, TypeError))
+	{
+		return InvalidParams(Request.Id, TypeError);
+	}
+
+	auto Task = [CollectionPath, bIncludeInherited, bHasTypeFilter, TypeFilter]() -> TSharedPtr<FJsonObject>
+	{
+		FString CollectionAssetPath;
+		FString Error;
+		UMaterialParameterCollection* Collection = ResolveMaterialParameterCollectionAsset(CollectionPath, CollectionAssetPath, Error);
+		if (!Collection)
+		{
+			return MakeFailure(Error);
+		}
+
+		TArray<const UMaterialParameterCollection*> Hierarchy;
+		if (bIncludeInherited)
+		{
+			GatherCollectionHierarchy(Collection, Hierarchy);
+		}
+		else
+		{
+			Hierarchy.Add(Collection);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ScalarParameters;
+		TArray<TSharedPtr<FJsonValue>> VectorParameters;
+		TArray<TSharedPtr<FJsonValue>> AllParameters;
+		for (const UMaterialParameterCollection* SourceCollection : Hierarchy)
+		{
+			if (!SourceCollection)
+			{
+				continue;
+			}
+
+			const FString SourcePath = NormalizeAssetPath(SourceCollection->GetPathName());
+			const bool bInherited = SourceCollection != Collection;
+
+			if (!bHasTypeFilter || TypeFilter == ECollectionParameterKind::Scalar)
+			{
+				for (const FCollectionScalarParameter& ScalarParameter : SourceCollection->ScalarParameters)
+				{
+					TSharedPtr<FJsonObject> ParameterObject = BuildCollectionScalarParameterJson(ScalarParameter, SourcePath, bInherited);
+					ScalarParameters.Add(MakeShared<FJsonValueObject>(ParameterObject));
+					AllParameters.Add(MakeShared<FJsonValueObject>(ParameterObject));
+				}
+			}
+
+			if (!bHasTypeFilter || TypeFilter == ECollectionParameterKind::Vector)
+			{
+				for (const FCollectionVectorParameter& VectorParameter : SourceCollection->VectorParameters)
+				{
+					TSharedPtr<FJsonObject> ParameterObject = BuildCollectionVectorParameterJson(VectorParameter, SourcePath, bInherited);
+					VectorParameters.Add(MakeShared<FJsonValueObject>(ParameterObject));
+					AllParameters.Add(MakeShared<FJsonValueObject>(ParameterObject));
+				}
+			}
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("parameter_collection_path"), CollectionAssetPath);
+		Result->SetBoolField(TEXT("include_inherited"), bIncludeInherited);
+		Result->SetStringField(TEXT("parameter_type_filter"), bHasTypeFilter ? CollectionParameterKindToString(TypeFilter) : TEXT("all"));
+		Result->SetArrayField(TEXT("parameters"), AllParameters);
+		Result->SetArrayField(TEXT("scalar_parameters"), ScalarParameters);
+		Result->SetArrayField(TEXT("vector_parameters"), VectorParameters);
+		Result->SetNumberField(TEXT("parameter_count"), AllParameters.Num());
+		Result->SetNumberField(TEXT("scalar_parameter_count"), ScalarParameters.Num());
+		Result->SetNumberField(TEXT("vector_parameter_count"), VectorParameters.Num());
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialCollectionAddScalar(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString CollectionPath;
+	if (!Request.Params->TryGetStringField(TEXT("parameter_collection_path"), CollectionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), CollectionPath);
+	}
+	if (CollectionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_collection_path'"));
+	}
+
+	FString ParameterName;
+	if (!Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_name'"));
+	}
+	const FString TrimmedParameterName = ParameterName.TrimStartAndEnd();
+	if (TrimmedParameterName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'parameter_name' cannot be empty"));
+	}
+
+	double ScalarDefaultValue = 0.0;
+	if (!Request.Params->TryGetNumberField(TEXT("default_value"), ScalarDefaultValue))
+	{
+		Request.Params->TryGetNumberField(TEXT("value"), ScalarDefaultValue);
+	}
+
+	auto Task = [CollectionPath, TrimmedParameterName, ScalarDefaultValue]() -> TSharedPtr<FJsonObject>
+	{
+		FString CollectionAssetPath;
+		FString Error;
+		UMaterialParameterCollection* Collection = ResolveMaterialParameterCollectionAsset(CollectionPath, CollectionAssetPath, Error);
+		if (!Collection)
+		{
+			return MakeFailure(Error);
+		}
+
+		if (Collection->GetParameterId(FName(*TrimmedParameterName)).IsValid())
+		{
+			return MakeFailure(FString::Printf(TEXT("Parameter already exists in collection hierarchy: %s"), *TrimmedParameterName));
+		}
+
+		Collection->PreEditChange(nullptr);
+		Collection->Modify();
+
+		FCollectionScalarParameter NewParameter;
+		NewParameter.ParameterName = FName(*TrimmedParameterName);
+		NewParameter.DefaultValue = static_cast<float>(ScalarDefaultValue);
+		Collection->ScalarParameters.Add(NewParameter);
+
+		Collection->PostEditChange();
+		Collection->MarkPackageDirty();
+
+		const int32 AddedIndex = FindCollectionScalarParameterIndex(Collection, TrimmedParameterName);
+		if (!Collection->ScalarParameters.IsValidIndex(AddedIndex))
+		{
+			return MakeFailure(TEXT("Failed to resolve added scalar parameter after insertion"));
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("parameter_collection_path"), CollectionAssetPath);
+		Result->SetObjectField(TEXT("parameter"), BuildCollectionScalarParameterJson(Collection->ScalarParameters[AddedIndex], CollectionAssetPath, false));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialCollectionAddVector(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString CollectionPath;
+	if (!Request.Params->TryGetStringField(TEXT("parameter_collection_path"), CollectionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), CollectionPath);
+	}
+	if (CollectionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_collection_path'"));
+	}
+
+	FString ParameterName;
+	if (!Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_name'"));
+	}
+	const FString TrimmedParameterName = ParameterName.TrimStartAndEnd();
+	if (TrimmedParameterName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'parameter_name' cannot be empty"));
+	}
+
+	FLinearColor VectorDefaultValue = FLinearColor::Black;
+	if (Request.Params->HasField(TEXT("default_value")) || Request.Params->HasField(TEXT("value")))
+	{
+		FString ParseError;
+		if (Request.Params->HasField(TEXT("default_value")))
+		{
+			if (!TryReadLinearColor(Request.Params, TEXT("default_value"), VectorDefaultValue, ParseError))
+			{
+				return InvalidParams(Request.Id, ParseError);
+			}
+		}
+		else if (!TryReadLinearColor(Request.Params, TEXT("value"), VectorDefaultValue, ParseError))
+		{
+			return InvalidParams(Request.Id, ParseError);
+		}
+	}
+
+	auto Task = [CollectionPath, TrimmedParameterName, VectorDefaultValue]() -> TSharedPtr<FJsonObject>
+	{
+		FString CollectionAssetPath;
+		FString Error;
+		UMaterialParameterCollection* Collection = ResolveMaterialParameterCollectionAsset(CollectionPath, CollectionAssetPath, Error);
+		if (!Collection)
+		{
+			return MakeFailure(Error);
+		}
+
+		if (Collection->GetParameterId(FName(*TrimmedParameterName)).IsValid())
+		{
+			return MakeFailure(FString::Printf(TEXT("Parameter already exists in collection hierarchy: %s"), *TrimmedParameterName));
+		}
+
+		Collection->PreEditChange(nullptr);
+		Collection->Modify();
+
+		FCollectionVectorParameter NewParameter;
+		NewParameter.ParameterName = FName(*TrimmedParameterName);
+		NewParameter.DefaultValue = VectorDefaultValue;
+		Collection->VectorParameters.Add(NewParameter);
+
+		Collection->PostEditChange();
+		Collection->MarkPackageDirty();
+
+		const int32 AddedIndex = FindCollectionVectorParameterIndex(Collection, TrimmedParameterName);
+		if (!Collection->VectorParameters.IsValidIndex(AddedIndex))
+		{
+			return MakeFailure(TEXT("Failed to resolve added vector parameter after insertion"));
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("parameter_collection_path"), CollectionAssetPath);
+		Result->SetObjectField(TEXT("parameter"), BuildCollectionVectorParameterJson(Collection->VectorParameters[AddedIndex], CollectionAssetPath, false));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialCollectionRemoveParameter(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString CollectionPath;
+	if (!Request.Params->TryGetStringField(TEXT("parameter_collection_path"), CollectionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), CollectionPath);
+	}
+	if (CollectionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_collection_path'"));
+	}
+
+	FString ParameterName;
+	if (!Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_name'"));
+	}
+	const FString TrimmedParameterName = ParameterName.TrimStartAndEnd();
+	if (TrimmedParameterName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'parameter_name' cannot be empty"));
+	}
+
+	ECollectionParameterKind TypeFilter = ECollectionParameterKind::Unknown;
+	bool bHasTypeFilter = false;
+	FString TypeError;
+	if (!ParseOptionalCollectionParameterKind(Request.Params, TypeFilter, bHasTypeFilter, TypeError))
+	{
+		return InvalidParams(Request.Id, TypeError);
+	}
+
+	auto Task = [CollectionPath, TrimmedParameterName, bHasTypeFilter, TypeFilter]() -> TSharedPtr<FJsonObject>
+	{
+		FString CollectionAssetPath;
+		FString Error;
+		UMaterialParameterCollection* Collection = ResolveMaterialParameterCollectionAsset(CollectionPath, CollectionAssetPath, Error);
+		if (!Collection)
+		{
+			return MakeFailure(Error);
+		}
+
+		const int32 ScalarIndex = FindCollectionScalarParameterIndex(Collection, TrimmedParameterName);
+		const int32 VectorIndex = FindCollectionVectorParameterIndex(Collection, TrimmedParameterName);
+
+		ECollectionParameterKind RemovalKind = ECollectionParameterKind::Unknown;
+		int32 RemovalIndex = INDEX_NONE;
+		if (bHasTypeFilter)
+		{
+			RemovalKind = TypeFilter;
+			if (TypeFilter == ECollectionParameterKind::Scalar)
+			{
+				RemovalIndex = ScalarIndex;
+			}
+			else if (TypeFilter == ECollectionParameterKind::Vector)
+			{
+				RemovalIndex = VectorIndex;
+			}
+		}
+		else
+		{
+			if (ScalarIndex != INDEX_NONE && VectorIndex != INDEX_NONE)
+			{
+				return MakeFailure(FString::Printf(TEXT("Parameter name '%s' exists as both scalar and vector; specify parameter_type"), *TrimmedParameterName));
+			}
+			if (ScalarIndex != INDEX_NONE)
+			{
+				RemovalKind = ECollectionParameterKind::Scalar;
+				RemovalIndex = ScalarIndex;
+			}
+			else if (VectorIndex != INDEX_NONE)
+			{
+				RemovalKind = ECollectionParameterKind::Vector;
+				RemovalIndex = VectorIndex;
+			}
+		}
+
+		if (RemovalIndex == INDEX_NONE)
+		{
+			const bool bExistsInBaseScalar = Collection->GetScalarParameterByName(FName(*TrimmedParameterName)) != nullptr;
+			const bool bExistsInBaseVector = Collection->GetVectorParameterByName(FName(*TrimmedParameterName)) != nullptr;
+			if (bExistsInBaseScalar || bExistsInBaseVector)
+			{
+				return MakeFailure(FString::Printf(TEXT("Parameter '%s' is inherited from a base collection and cannot be removed from this collection"), *TrimmedParameterName));
+			}
+			return MakeFailure(FString::Printf(TEXT("Parameter not found in collection: %s"), *TrimmedParameterName));
+		}
+
+		Collection->PreEditChange(nullptr);
+		Collection->Modify();
+
+		TSharedPtr<FJsonObject> RemovedParameter;
+		if (RemovalKind == ECollectionParameterKind::Scalar)
+		{
+			const FCollectionScalarParameter Removed = Collection->ScalarParameters[RemovalIndex];
+			RemovedParameter = BuildCollectionScalarParameterJson(Removed, CollectionAssetPath, false);
+			Collection->ScalarParameters.RemoveAt(RemovalIndex);
+		}
+		else
+		{
+			const FCollectionVectorParameter Removed = Collection->VectorParameters[RemovalIndex];
+			RemovedParameter = BuildCollectionVectorParameterJson(Removed, CollectionAssetPath, false);
+			Collection->VectorParameters.RemoveAt(RemovalIndex);
+		}
+
+		Collection->PostEditChange();
+		Collection->MarkPackageDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("parameter_collection_path"), CollectionAssetPath);
+		Result->SetStringField(TEXT("parameter_type"), CollectionParameterKindToString(RemovalKind));
+		Result->SetObjectField(TEXT("removed_parameter"), RemovedParameter);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialCollectionRenameParameter(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString CollectionPath;
+	if (!Request.Params->TryGetStringField(TEXT("parameter_collection_path"), CollectionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), CollectionPath);
+	}
+	if (CollectionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_collection_path'"));
+	}
+
+	FString OldParameterName;
+	if (!Request.Params->TryGetStringField(TEXT("parameter_name"), OldParameterName))
+	{
+		Request.Params->TryGetStringField(TEXT("old_parameter_name"), OldParameterName);
+	}
+	FString NewParameterName;
+	if (!Request.Params->TryGetStringField(TEXT("new_parameter_name"), NewParameterName))
+	{
+		Request.Params->TryGetStringField(TEXT("new_name"), NewParameterName);
+	}
+
+	const FString TrimmedOldName = OldParameterName.TrimStartAndEnd();
+	const FString TrimmedNewName = NewParameterName.TrimStartAndEnd();
+	if (TrimmedOldName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_name'"));
+	}
+	if (TrimmedNewName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'new_parameter_name'"));
+	}
+
+	ECollectionParameterKind TypeFilter = ECollectionParameterKind::Unknown;
+	bool bHasTypeFilter = false;
+	FString TypeError;
+	if (!ParseOptionalCollectionParameterKind(Request.Params, TypeFilter, bHasTypeFilter, TypeError))
+	{
+		return InvalidParams(Request.Id, TypeError);
+	}
+
+	auto Task = [CollectionPath, TrimmedOldName, TrimmedNewName, bHasTypeFilter, TypeFilter]() -> TSharedPtr<FJsonObject>
+	{
+		FString CollectionAssetPath;
+		FString Error;
+		UMaterialParameterCollection* Collection = ResolveMaterialParameterCollectionAsset(CollectionPath, CollectionAssetPath, Error);
+		if (!Collection)
+		{
+			return MakeFailure(Error);
+		}
+
+		const int32 ScalarIndex = FindCollectionScalarParameterIndex(Collection, TrimmedOldName);
+		const int32 VectorIndex = FindCollectionVectorParameterIndex(Collection, TrimmedOldName);
+
+		ECollectionParameterKind RenameKind = ECollectionParameterKind::Unknown;
+		int32 RenameIndex = INDEX_NONE;
+		if (bHasTypeFilter)
+		{
+			RenameKind = TypeFilter;
+			if (TypeFilter == ECollectionParameterKind::Scalar)
+			{
+				RenameIndex = ScalarIndex;
+			}
+			else if (TypeFilter == ECollectionParameterKind::Vector)
+			{
+				RenameIndex = VectorIndex;
+			}
+		}
+		else
+		{
+			if (ScalarIndex != INDEX_NONE && VectorIndex != INDEX_NONE)
+			{
+				return MakeFailure(FString::Printf(TEXT("Parameter name '%s' exists as both scalar and vector; specify parameter_type"), *TrimmedOldName));
+			}
+			if (ScalarIndex != INDEX_NONE)
+			{
+				RenameKind = ECollectionParameterKind::Scalar;
+				RenameIndex = ScalarIndex;
+			}
+			else if (VectorIndex != INDEX_NONE)
+			{
+				RenameKind = ECollectionParameterKind::Vector;
+				RenameIndex = VectorIndex;
+			}
+		}
+
+		if (RenameIndex == INDEX_NONE)
+		{
+			const bool bExistsInBaseScalar = Collection->GetScalarParameterByName(FName(*TrimmedOldName)) != nullptr;
+			const bool bExistsInBaseVector = Collection->GetVectorParameterByName(FName(*TrimmedOldName)) != nullptr;
+			if (bExistsInBaseScalar || bExistsInBaseVector)
+			{
+				return MakeFailure(FString::Printf(TEXT("Parameter '%s' is inherited from a base collection and cannot be renamed here"), *TrimmedOldName));
+			}
+			return MakeFailure(FString::Printf(TEXT("Parameter not found in collection: %s"), *TrimmedOldName));
+		}
+
+		if (!TrimmedOldName.Equals(TrimmedNewName, ESearchCase::IgnoreCase) &&
+			Collection->GetParameterId(FName(*TrimmedNewName)).IsValid())
+		{
+			return MakeFailure(FString::Printf(TEXT("A parameter named '%s' already exists in this collection hierarchy"), *TrimmedNewName));
+		}
+
+		Collection->PreEditChange(nullptr);
+		Collection->Modify();
+		if (RenameKind == ECollectionParameterKind::Scalar)
+		{
+			Collection->ScalarParameters[RenameIndex].ParameterName = FName(*TrimmedNewName);
+		}
+		else
+		{
+			Collection->VectorParameters[RenameIndex].ParameterName = FName(*TrimmedNewName);
+		}
+		Collection->PostEditChange();
+		Collection->MarkPackageDirty();
+
+		TSharedPtr<FJsonObject> UpdatedParameter;
+		if (RenameKind == ECollectionParameterKind::Scalar)
+		{
+			const int32 UpdatedIndex = FindCollectionScalarParameterIndex(Collection, TrimmedNewName);
+			if (!Collection->ScalarParameters.IsValidIndex(UpdatedIndex))
+			{
+				return MakeFailure(TEXT("Renamed scalar parameter could not be resolved after rename"));
+			}
+			UpdatedParameter = BuildCollectionScalarParameterJson(Collection->ScalarParameters[UpdatedIndex], CollectionAssetPath, false);
+		}
+		else
+		{
+			const int32 UpdatedIndex = FindCollectionVectorParameterIndex(Collection, TrimmedNewName);
+			if (!Collection->VectorParameters.IsValidIndex(UpdatedIndex))
+			{
+				return MakeFailure(TEXT("Renamed vector parameter could not be resolved after rename"));
+			}
+			UpdatedParameter = BuildCollectionVectorParameterJson(Collection->VectorParameters[UpdatedIndex], CollectionAssetPath, false);
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("parameter_collection_path"), CollectionAssetPath);
+		Result->SetStringField(TEXT("old_parameter_name"), TrimmedOldName);
+		Result->SetStringField(TEXT("new_parameter_name"), UpdatedParameter->GetStringField(TEXT("parameter_name")));
+		Result->SetStringField(TEXT("parameter_type"), CollectionParameterKindToString(RenameKind));
+		Result->SetObjectField(TEXT("parameter"), UpdatedParameter);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialCollectionSetDefaultValue(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString CollectionPath;
+	if (!Request.Params->TryGetStringField(TEXT("parameter_collection_path"), CollectionPath))
+	{
+		Request.Params->TryGetStringField(TEXT("asset_path"), CollectionPath);
+	}
+	if (CollectionPath.TrimStartAndEnd().IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_collection_path'"));
+	}
+
+	FString ParameterName;
+	if (!Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_name'"));
+	}
+	const FString TrimmedParameterName = ParameterName.TrimStartAndEnd();
+	if (TrimmedParameterName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'parameter_name' cannot be empty"));
+	}
+
+	ECollectionParameterKind TypeFilter = ECollectionParameterKind::Unknown;
+	bool bHasTypeFilter = false;
+	FString TypeError;
+	if (!ParseOptionalCollectionParameterKind(Request.Params, TypeFilter, bHasTypeFilter, TypeError))
+	{
+		return InvalidParams(Request.Id, TypeError);
+	}
+
+	const bool bHasScalarValueField = Request.Params->HasField(TEXT("value")) || Request.Params->HasField(TEXT("default_value"));
+	double ScalarValue = 0.0;
+	bool bHasScalarValue = false;
+	if (Request.Params->TryGetNumberField(TEXT("value"), ScalarValue) || Request.Params->TryGetNumberField(TEXT("default_value"), ScalarValue))
+	{
+		bHasScalarValue = true;
+	}
+
+	FLinearColor VectorValue = FLinearColor::Black;
+	bool bHasVectorValue = false;
+	if (Request.Params->HasField(TEXT("value")))
+	{
+		FString ParseError;
+		if (TryReadLinearColor(Request.Params, TEXT("value"), VectorValue, ParseError))
+		{
+			bHasVectorValue = true;
+		}
+	}
+	if (!bHasVectorValue && Request.Params->HasField(TEXT("default_value")))
+	{
+		FString ParseError;
+		if (TryReadLinearColor(Request.Params, TEXT("default_value"), VectorValue, ParseError))
+		{
+			bHasVectorValue = true;
+		}
+	}
+
+	auto Task = [CollectionPath, TrimmedParameterName, bHasTypeFilter, TypeFilter, bHasScalarValueField, bHasScalarValue, ScalarValue, bHasVectorValue, VectorValue]() -> TSharedPtr<FJsonObject>
+	{
+		FString CollectionAssetPath;
+		FString Error;
+		UMaterialParameterCollection* Collection = ResolveMaterialParameterCollectionAsset(CollectionPath, CollectionAssetPath, Error);
+		if (!Collection)
+		{
+			return MakeFailure(Error);
+		}
+
+		const int32 DirectScalarIndex = FindCollectionScalarParameterIndex(Collection, TrimmedParameterName);
+		const int32 DirectVectorIndex = FindCollectionVectorParameterIndex(Collection, TrimmedParameterName);
+		const bool bScalarExists = Collection->GetScalarParameterByName(FName(*TrimmedParameterName)) != nullptr;
+		const bool bVectorExists = Collection->GetVectorParameterByName(FName(*TrimmedParameterName)) != nullptr;
+		const bool bDirectScalarExists = DirectScalarIndex != INDEX_NONE;
+		const bool bDirectVectorExists = DirectVectorIndex != INDEX_NONE;
+
+		ECollectionParameterKind TargetKind = ECollectionParameterKind::Unknown;
+		if (bHasTypeFilter)
+		{
+			TargetKind = TypeFilter;
+		}
+		else
+		{
+			if (bDirectScalarExists && bDirectVectorExists)
+			{
+				return MakeFailure(FString::Printf(TEXT("Parameter '%s' exists as both scalar and vector; specify parameter_type"), *TrimmedParameterName));
+			}
+			if (bDirectScalarExists)
+			{
+				TargetKind = ECollectionParameterKind::Scalar;
+			}
+			else if (bDirectVectorExists)
+			{
+				TargetKind = ECollectionParameterKind::Vector;
+			}
+		}
+
+		if (TargetKind == ECollectionParameterKind::Unknown)
+		{
+			if (bScalarExists || bVectorExists)
+			{
+				return MakeFailure(FString::Printf(TEXT("Parameter '%s' is inherited from a base collection; setting inherited overrides is not supported by this tool"), *TrimmedParameterName));
+			}
+			return MakeFailure(FString::Printf(TEXT("Parameter not found in collection: %s"), *TrimmedParameterName));
+		}
+
+		if (TargetKind == ECollectionParameterKind::Scalar && !bDirectScalarExists)
+		{
+			if (bScalarExists)
+			{
+				return MakeFailure(FString::Printf(TEXT("Scalar parameter '%s' is inherited from a base collection; setting inherited overrides is not supported by this tool"), *TrimmedParameterName));
+			}
+			return MakeFailure(FString::Printf(TEXT("Scalar parameter not found in collection: %s"), *TrimmedParameterName));
+		}
+		if (TargetKind == ECollectionParameterKind::Vector && !bDirectVectorExists)
+		{
+			if (bVectorExists)
+			{
+				return MakeFailure(FString::Printf(TEXT("Vector parameter '%s' is inherited from a base collection; setting inherited overrides is not supported by this tool"), *TrimmedParameterName));
+			}
+			return MakeFailure(FString::Printf(TEXT("Vector parameter not found in collection: %s"), *TrimmedParameterName));
+		}
+
+		if (TargetKind == ECollectionParameterKind::Scalar)
+		{
+			if (!bHasScalarValueField || !bHasScalarValue)
+			{
+				return MakeFailure(TEXT("Scalar default value requires numeric 'value' (or 'default_value')"));
+			}
+		}
+		else if (!bHasVectorValue)
+		{
+			return MakeFailure(TEXT("Vector default value requires a color object/string in 'value' (or 'default_value')"));
+		}
+
+		Collection->PreEditChange(nullptr);
+		Collection->Modify();
+
+		bool bChanged = false;
+		if (TargetKind == ECollectionParameterKind::Scalar)
+		{
+			FCollectionScalarParameter& ScalarParameter = Collection->ScalarParameters[DirectScalarIndex];
+			const float NewValue = static_cast<float>(ScalarValue);
+			bChanged = !FMath::IsNearlyEqual(ScalarParameter.DefaultValue, NewValue);
+			ScalarParameter.DefaultValue = NewValue;
+		}
+		else
+		{
+			FCollectionVectorParameter& VectorParameter = Collection->VectorParameters[DirectVectorIndex];
+			bChanged = !VectorParameter.DefaultValue.Equals(VectorValue);
+			VectorParameter.DefaultValue = VectorValue;
+		}
+
+		Collection->PostEditChange();
+		Collection->MarkPackageDirty();
+
+		if (!bChanged)
+		{
+			return MakeFailure(FString::Printf(TEXT("Failed to set default value for parameter: %s"), *TrimmedParameterName));
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("parameter_collection_path"), CollectionAssetPath);
+		Result->SetStringField(TEXT("parameter_name"), TrimmedParameterName);
+		Result->SetStringField(TEXT("parameter_type"), CollectionParameterKindToString(TargetKind));
+		if (TargetKind == ECollectionParameterKind::Scalar)
+		{
+			const float UpdatedValue = Collection->ScalarParameters[DirectScalarIndex].DefaultValue;
+			Result->SetBoolField(TEXT("parameter_found"), true);
+			Result->SetNumberField(TEXT("default_value"), UpdatedValue);
+		}
+		else
+		{
+			const FLinearColor UpdatedValue = Collection->VectorParameters[DirectVectorIndex].DefaultValue;
+			Result->SetBoolField(TEXT("parameter_found"), true);
+			Result->SetObjectField(TEXT("default_value"), BuildColorJson(UpdatedValue));
+		}
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
 FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 {
 	auto Task = []() -> TSharedPtr<FJsonObject>
@@ -7747,6 +8733,7 @@ FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 		PhasesObj->SetBoolField(TEXT("phase_5_parameter_authoring"), true);
 		PhasesObj->SetBoolField(TEXT("phase_6_material_instance_support"), true);
 		PhasesObj->SetBoolField(TEXT("phase_7_material_function_support"), true);
+		PhasesObj->SetBoolField(TEXT("phase_8_parameter_collection_support"), true);
 		Result->SetObjectField(TEXT("phases"), PhasesObj);
 
 		TSharedPtr<FJsonObject> DependenciesObj = MakeShared<FJsonObject>();
