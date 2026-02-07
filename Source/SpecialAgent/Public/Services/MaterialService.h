@@ -22,5 +22,15 @@ public:
 	virtual TArray<FMCPToolInfo> GetAvailableTools() const override;
 
 private:
+	FMCPResponse HandleCreateMaterial(const FMCPRequest& Request);
+	FMCPResponse HandleCreateMaterialInstance(const FMCPRequest& Request);
+	FMCPResponse HandleCreateMaterialFunction(const FMCPRequest& Request);
+	FMCPResponse HandleCreateParameterCollection(const FMCPRequest& Request);
+	FMCPResponse HandleDuplicateAsset(const FMCPRequest& Request);
+	FMCPResponse HandleRenameAsset(const FMCPRequest& Request);
+	FMCPResponse HandleDeleteAsset(const FMCPRequest& Request);
+	FMCPResponse HandleSaveAsset(const FMCPRequest& Request);
+	FMCPResponse HandleGetMaterialInfo(const FMCPRequest& Request);
+	FMCPResponse HandleSetMaterialSettings(const FMCPRequest& Request);
 	FMCPResponse HandleCapabilities(const FMCPRequest& Request);
 };
