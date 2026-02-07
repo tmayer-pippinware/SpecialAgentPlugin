@@ -22,6 +22,7 @@
 #include "K2Node.h"
 #include "K2Node_Knot.h"
 #include "K2Node_MacroInstance.h"
+#include "K2Node_Variable.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
 #include "EdGraphSchema_K2.h"
@@ -4294,6 +4295,166 @@ TArray<FMCPToolInfo> FBlueprintService::GetAvailableTools() const
 
 	{
 		FMCPToolInfo Tool;
+		Tool.Name = TEXT("find_references");
+		Tool.Description = TEXT("Find references to a variable, function call, or specific node.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> TypeParam = MakeShared<FJsonObject>();
+		TypeParam->SetStringField(TEXT("type"), TEXT("string"));
+		TypeParam->SetStringField(TEXT("description"), TEXT("Reference target type: variable, function, or node."));
+		Tool.Parameters->SetObjectField(TEXT("symbol_type"), TypeParam);
+
+		TSharedPtr<FJsonObject> NameParam = MakeShared<FJsonObject>();
+		NameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NameParam->SetStringField(TEXT("description"), TEXT("Variable/function symbol name."));
+		Tool.Parameters->SetObjectField(TEXT("symbol_name"), NameParam);
+
+		TSharedPtr<FJsonObject> NodeIdParam = MakeShared<FJsonObject>();
+		NodeIdParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeIdParam->SetStringField(TEXT("description"), TEXT("Node id (required for symbol_type=node)."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeIdParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Optional graph filter."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("symbol_type"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("rename_symbol");
+		Tool.Description = TEXT("Rename a variable/function/node symbol with graph-safe updates.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> TypeParam = MakeShared<FJsonObject>();
+		TypeParam->SetStringField(TEXT("type"), TEXT("string"));
+		TypeParam->SetStringField(TEXT("description"), TEXT("Symbol type: variable, function, or node."));
+		Tool.Parameters->SetObjectField(TEXT("symbol_type"), TypeParam);
+
+		TSharedPtr<FJsonObject> OldNameParam = MakeShared<FJsonObject>();
+		OldNameParam->SetStringField(TEXT("type"), TEXT("string"));
+		OldNameParam->SetStringField(TEXT("description"), TEXT("Existing symbol name (variable/function)."));
+		Tool.Parameters->SetObjectField(TEXT("old_name"), OldNameParam);
+
+		TSharedPtr<FJsonObject> NewNameParam = MakeShared<FJsonObject>();
+		NewNameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NewNameParam->SetStringField(TEXT("description"), TEXT("New symbol name."));
+		Tool.Parameters->SetObjectField(TEXT("new_name"), NewNameParam);
+
+		TSharedPtr<FJsonObject> NodeIdParam = MakeShared<FJsonObject>();
+		NodeIdParam->SetStringField(TEXT("type"), TEXT("string"));
+		NodeIdParam->SetStringField(TEXT("description"), TEXT("Node id (required for symbol_type=node)."));
+		Tool.Parameters->SetObjectField(TEXT("node_id"), NodeIdParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Graph name for node rename (default: EventGraph)."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("symbol_type"));
+		Tool.RequiredParams.Add(TEXT("new_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("replace_function_calls");
+		Tool.Description = TEXT("Replace call-function nodes from one function to another.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> OldNameParam = MakeShared<FJsonObject>();
+		OldNameParam->SetStringField(TEXT("type"), TEXT("string"));
+		OldNameParam->SetStringField(TEXT("description"), TEXT("Old function name to replace."));
+		Tool.Parameters->SetObjectField(TEXT("old_function_name"), OldNameParam);
+
+		TSharedPtr<FJsonObject> NewNameParam = MakeShared<FJsonObject>();
+		NewNameParam->SetStringField(TEXT("type"), TEXT("string"));
+		NewNameParam->SetStringField(TEXT("description"), TEXT("Replacement function name."));
+		Tool.Parameters->SetObjectField(TEXT("new_function_name"), NewNameParam);
+
+		TSharedPtr<FJsonObject> OldClassParam = MakeShared<FJsonObject>();
+		OldClassParam->SetStringField(TEXT("type"), TEXT("string"));
+		OldClassParam->SetStringField(TEXT("description"), TEXT("Optional old function class filter."));
+		Tool.Parameters->SetObjectField(TEXT("old_function_class"), OldClassParam);
+
+		TSharedPtr<FJsonObject> NewClassParam = MakeShared<FJsonObject>();
+		NewClassParam->SetStringField(TEXT("type"), TEXT("string"));
+		NewClassParam->SetStringField(TEXT("description"), TEXT("Optional replacement function class (defaults to self context where possible)."));
+		Tool.Parameters->SetObjectField(TEXT("new_function_class"), NewClassParam);
+
+		TSharedPtr<FJsonObject> GraphParam = MakeShared<FJsonObject>();
+		GraphParam->SetStringField(TEXT("type"), TEXT("string"));
+		GraphParam->SetStringField(TEXT("description"), TEXT("Optional graph filter."));
+		Tool.Parameters->SetObjectField(TEXT("graph_name"), GraphParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("old_function_name"));
+		Tool.RequiredParams.Add(TEXT("new_function_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("remove_unused_variables");
+		Tool.Description = TEXT("Remove unused member variables (skips component variables and dispatchers by default).");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> DryRunParam = MakeShared<FJsonObject>();
+		DryRunParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		DryRunParam->SetStringField(TEXT("description"), TEXT("If true, only report candidates without deleting."));
+		Tool.Parameters->SetObjectField(TEXT("dry_run"), DryRunParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("remove_unused_functions");
+		Tool.Description = TEXT("Remove unused function graphs.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> DryRunParam = MakeShared<FJsonObject>();
+		DryRunParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		DryRunParam->SetStringField(TEXT("description"), TEXT("If true, only report candidates without deleting."));
+		Tool.Parameters->SetObjectField(TEXT("dry_run"), DryRunParam);
+
+		TSharedPtr<FJsonObject> IncludeOverridesParam = MakeShared<FJsonObject>();
+		IncludeOverridesParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		IncludeOverridesParam->SetStringField(TEXT("description"), TEXT("If true, include override/interface functions in removal candidates."));
+		Tool.Parameters->SetObjectField(TEXT("include_overrides"), IncludeOverridesParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
 		Tool.Name = TEXT("set_pin_default_value");
 		Tool.Description = TEXT("Set a node pin default value string.");
 
@@ -4464,6 +4625,11 @@ FMCPResponse FBlueprintService::HandleRequest(const FMCPRequest& Request, const 
 	if (MethodName == TEXT("split_struct_pin")) return HandleSplitStructPin(Request);
 	if (MethodName == TEXT("recombine_struct_pin")) return HandleRecombineStructPin(Request);
 	if (MethodName == TEXT("promote_pin_to_variable")) return HandlePromotePinToVariable(Request);
+	if (MethodName == TEXT("find_references")) return HandleFindReferences(Request);
+	if (MethodName == TEXT("rename_symbol")) return HandleRenameSymbol(Request);
+	if (MethodName == TEXT("replace_function_calls")) return HandleReplaceFunctionCalls(Request);
+	if (MethodName == TEXT("remove_unused_variables")) return HandleRemoveUnusedVariables(Request);
+	if (MethodName == TEXT("remove_unused_functions")) return HandleRemoveUnusedFunctions(Request);
 	if (MethodName == TEXT("set_pin_default_value")) return HandleSetPinDefaultValue(Request);
 	if (MethodName == TEXT("connect_pins")) return HandleConnectPins(Request);
 	if (MethodName == TEXT("compile_blueprint")) return HandleCompileBlueprint(Request);
@@ -11788,6 +11954,962 @@ FMCPResponse FBlueprintService::HandlePromotePinToVariable(const FMCPRequest& Re
 		Result->SetStringField(TEXT("variable_name"), VariableName.ToString());
 		Result->SetStringField(TEXT("variable_scope"), bToMemberVariable ? TEXT("member") : TEXT("local"));
 		Result->SetObjectField(TEXT("promoted_node"), BuildNodeJson(PromotedNode));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleFindReferences(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString SymbolType;
+	FString SymbolName;
+	FString NodeId;
+	FString GraphName;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("symbol_type"), SymbolType))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'symbol_type'"));
+	}
+	Request.Params->TryGetStringField(TEXT("symbol_name"), SymbolName);
+	Request.Params->TryGetStringField(TEXT("node_id"), NodeId);
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, SymbolType, SymbolName, NodeId, GraphName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		const FString Type = SymbolType.TrimStartAndEnd().ToLower();
+		const FString TrimmedSymbolName = SymbolName.TrimStartAndEnd();
+		const FString TrimmedNodeId = NodeId.TrimStartAndEnd();
+		const FString GraphFilter = GraphName.TrimStartAndEnd();
+
+		TArray<UEdGraph*> TargetGraphs;
+		if (!GraphFilter.IsEmpty())
+		{
+			UEdGraph* FilterGraph = ResolveGraph(Blueprint, GraphFilter);
+			if (!FilterGraph)
+			{
+				return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphFilter));
+			}
+			TargetGraphs.Add(FilterGraph);
+		}
+		else
+		{
+			Blueprint->GetAllGraphs(TargetGraphs);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ReferencesJson;
+		auto AddNodeReference = [&ReferencesJson](const FString& ReferenceKind, UEdGraph* Graph, UEdGraphNode* Node) -> TSharedPtr<FJsonObject>
+		{
+			TSharedPtr<FJsonObject> Ref = MakeShared<FJsonObject>();
+			Ref->SetStringField(TEXT("reference_kind"), ReferenceKind);
+			Ref->SetStringField(TEXT("graph_name"), Graph ? Graph->GetName() : TEXT(""));
+			Ref->SetStringField(TEXT("graph_path"), Graph ? Graph->GetPathName() : TEXT(""));
+			if (Node)
+			{
+				Ref->SetStringField(TEXT("node_id"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+				Ref->SetStringField(TEXT("node_title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+				Ref->SetStringField(TEXT("node_class"), Node->GetClass()->GetName());
+				Ref->SetNumberField(TEXT("x"), Node->NodePosX);
+				Ref->SetNumberField(TEXT("y"), Node->NodePosY);
+			}
+			ReferencesJson.Add(MakeShared<FJsonValueObject>(Ref));
+			return Ref;
+		};
+
+		if (Type == TEXT("variable"))
+		{
+			if (TrimmedSymbolName.IsEmpty())
+			{
+				return Fail(TEXT("symbol_name is required for symbol_type=variable"));
+			}
+
+			const FName VariableName(*TrimmedSymbolName);
+			for (UEdGraph* Graph : TargetGraphs)
+			{
+				if (!Graph)
+				{
+					continue;
+				}
+
+				for (UEdGraphNode* Node : Graph->Nodes)
+				{
+					UK2Node_Variable* VariableNode = Cast<UK2Node_Variable>(Node);
+					if (!VariableNode || VariableNode->GetVarName() != VariableName)
+					{
+						continue;
+					}
+
+					TSharedPtr<FJsonObject> Ref = AddNodeReference(TEXT("variable"), Graph, Node);
+					Ref->SetStringField(TEXT("symbol_name"), VariableName.ToString());
+					if (Cast<UK2Node_VariableGet>(Node))
+					{
+						Ref->SetStringField(TEXT("access_type"), TEXT("get"));
+					}
+					else if (Cast<UK2Node_VariableSet>(Node))
+					{
+						Ref->SetStringField(TEXT("access_type"), TEXT("set"));
+					}
+					else
+					{
+						Ref->SetStringField(TEXT("access_type"), TEXT("variable"));
+					}
+				}
+			}
+
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetStringField(TEXT("symbol_type"), Type);
+			Result->SetStringField(TEXT("symbol_name"), VariableName.ToString());
+			Result->SetArrayField(TEXT("references"), ReferencesJson);
+			Result->SetNumberField(TEXT("count"), ReferencesJson.Num());
+			return Result;
+		}
+
+		if (Type == TEXT("function"))
+		{
+			if (TrimmedSymbolName.IsEmpty())
+			{
+				return Fail(TEXT("symbol_name is required for symbol_type=function"));
+			}
+
+			const FName FunctionName(*TrimmedSymbolName);
+			for (UEdGraph* Graph : TargetGraphs)
+			{
+				if (!Graph)
+				{
+					continue;
+				}
+
+				for (UEdGraphNode* Node : Graph->Nodes)
+				{
+					UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node);
+					if (!CallNode || CallNode->GetFunctionName() != FunctionName)
+					{
+						continue;
+					}
+
+					TSharedPtr<FJsonObject> Ref = AddNodeReference(TEXT("function"), Graph, Node);
+					Ref->SetStringField(TEXT("symbol_name"), FunctionName.ToString());
+					if (UFunction* TargetFunction = CallNode->GetTargetFunction())
+					{
+						Ref->SetStringField(TEXT("target_function_path"), TargetFunction->GetPathName());
+						if (UClass* OwnerClass = TargetFunction->GetOwnerClass())
+						{
+							Ref->SetStringField(TEXT("target_function_class"), OwnerClass->GetPathName());
+						}
+					}
+				}
+			}
+
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetStringField(TEXT("symbol_type"), Type);
+			Result->SetStringField(TEXT("symbol_name"), FunctionName.ToString());
+			Result->SetArrayField(TEXT("references"), ReferencesJson);
+			Result->SetNumberField(TEXT("count"), ReferencesJson.Num());
+			return Result;
+		}
+
+		if (Type == TEXT("node"))
+		{
+			const FString ResolvedNodeId = !TrimmedNodeId.IsEmpty() ? TrimmedNodeId : TrimmedSymbolName;
+			if (ResolvedNodeId.IsEmpty())
+			{
+				return Fail(TEXT("node_id is required for symbol_type=node"));
+			}
+
+			UEdGraph* OwnerGraph = nullptr;
+			UEdGraphNode* OwnerNode = nullptr;
+			for (UEdGraph* Graph : TargetGraphs)
+			{
+				UEdGraphNode* CandidateNode = FindNodeById(Graph, ResolvedNodeId);
+				if (CandidateNode)
+				{
+					OwnerGraph = Graph;
+					OwnerNode = CandidateNode;
+					break;
+				}
+			}
+
+			if (!OwnerNode)
+			{
+				return Fail(FString::Printf(TEXT("Node not found: %s"), *ResolvedNodeId));
+			}
+
+			Result->SetObjectField(TEXT("node"), BuildNodeJson(OwnerNode));
+			TSet<FString> SeenLinks;
+			for (const UEdGraphPin* Pin : GatherNodePins(OwnerNode))
+			{
+				if (!Pin)
+				{
+					continue;
+				}
+
+				for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
+				{
+					if (!LinkedPin)
+					{
+						continue;
+					}
+
+					UEdGraphNode* LinkedNode = LinkedPin->GetOwningNodeUnchecked();
+					if (!LinkedNode)
+					{
+						continue;
+					}
+
+					const FString LinkKey = FString::Printf(
+						TEXT("%s|%s|%s|%s"),
+						*BuildPinPath(Pin),
+						*LinkedNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens),
+						*BuildPinPath(LinkedPin),
+						*PinDirectionToString(Pin->Direction)
+					);
+					if (SeenLinks.Contains(LinkKey))
+					{
+						continue;
+					}
+					SeenLinks.Add(LinkKey);
+
+					TSharedPtr<FJsonObject> Ref = MakeShared<FJsonObject>();
+					Ref->SetStringField(TEXT("reference_kind"), TEXT("node_link"));
+					Ref->SetStringField(TEXT("graph_name"), OwnerGraph ? OwnerGraph->GetName() : TEXT(""));
+					Ref->SetStringField(TEXT("from_node_id"), OwnerNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+					Ref->SetStringField(TEXT("from_pin_name"), Pin->PinName.ToString());
+					Ref->SetStringField(TEXT("from_pin_path"), BuildPinPath(Pin));
+					Ref->SetStringField(TEXT("from_pin_direction"), PinDirectionToString(Pin->Direction));
+					Ref->SetStringField(TEXT("to_node_id"), LinkedNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+					Ref->SetStringField(TEXT("to_node_title"), LinkedNode->GetNodeTitle(ENodeTitleType::ListView).ToString());
+					Ref->SetStringField(TEXT("to_node_class"), LinkedNode->GetClass()->GetName());
+					Ref->SetStringField(TEXT("to_pin_name"), LinkedPin->PinName.ToString());
+					Ref->SetStringField(TEXT("to_pin_path"), BuildPinPath(LinkedPin));
+					Ref->SetStringField(TEXT("to_pin_direction"), PinDirectionToString(LinkedPin->Direction));
+					ReferencesJson.Add(MakeShared<FJsonValueObject>(Ref));
+				}
+			}
+
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetStringField(TEXT("symbol_type"), Type);
+			Result->SetStringField(TEXT("node_id"), ResolvedNodeId);
+			Result->SetArrayField(TEXT("references"), ReferencesJson);
+			Result->SetNumberField(TEXT("count"), ReferencesJson.Num());
+			return Result;
+		}
+
+		return Fail(FString::Printf(TEXT("Unsupported symbol_type '%s'. Supported: variable, function, node"), *SymbolType));
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleRenameSymbol(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString SymbolType;
+	FString OldName;
+	FString NewName;
+	FString NodeId;
+	FString GraphName = TEXT("EventGraph");
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("symbol_type"), SymbolType))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'symbol_type'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("new_name"), NewName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'new_name'"));
+	}
+	Request.Params->TryGetStringField(TEXT("old_name"), OldName);
+	if (OldName.IsEmpty())
+	{
+		Request.Params->TryGetStringField(TEXT("symbol_name"), OldName);
+	}
+	Request.Params->TryGetStringField(TEXT("node_id"), NodeId);
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, SymbolType, OldName, NewName, NodeId, GraphName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		const FString Type = SymbolType.TrimStartAndEnd().ToLower();
+		const FString TrimmedOldName = OldName.TrimStartAndEnd();
+		const FString TrimmedNewName = NewName.TrimStartAndEnd();
+		const FString TrimmedNodeId = NodeId.TrimStartAndEnd();
+		const FString TrimmedGraphName = GraphName.TrimStartAndEnd();
+
+		if (TrimmedNewName.IsEmpty())
+		{
+			return Fail(TEXT("new_name must be non-empty"));
+		}
+
+		if (Type == TEXT("variable"))
+		{
+			if (TrimmedOldName.IsEmpty())
+			{
+				return Fail(TEXT("old_name is required for symbol_type=variable"));
+			}
+
+			const FName OldVarName(*TrimmedOldName);
+			const FName NewVarName(*TrimmedNewName);
+			const int32 OldIndex = FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, OldVarName);
+			if (OldIndex == INDEX_NONE)
+			{
+				return Fail(FString::Printf(TEXT("Variable not found: %s"), *TrimmedOldName));
+			}
+			if (OldVarName != NewVarName && FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, NewVarName) != INDEX_NONE)
+			{
+				return Fail(FString::Printf(TEXT("Variable already exists: %s"), *TrimmedNewName));
+			}
+
+			int32 ReferenceCountBefore = 0;
+			TArray<UEdGraph*> GraphsBefore;
+			Blueprint->GetAllGraphs(GraphsBefore);
+			for (UEdGraph* Graph : GraphsBefore)
+			{
+				if (!Graph)
+				{
+					continue;
+				}
+				for (UEdGraphNode* Node : Graph->Nodes)
+				{
+					if (const UK2Node_Variable* VariableNode = Cast<UK2Node_Variable>(Node))
+					{
+						if (VariableNode->GetVarName() == OldVarName)
+						{
+							++ReferenceCountBefore;
+						}
+					}
+				}
+			}
+
+			FBlueprintEditorUtils::RenameMemberVariable(Blueprint, OldVarName, NewVarName);
+			FBlueprintEditorUtils::ReplaceVariableReferences(Blueprint, OldVarName, NewVarName);
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+			const int32 NewIndex = FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, NewVarName);
+			if (NewIndex == INDEX_NONE)
+			{
+				return Fail(FString::Printf(TEXT("Failed to rename variable '%s' to '%s'"), *TrimmedOldName, *TrimmedNewName));
+			}
+
+			int32 ReferenceCountAfter = 0;
+			TArray<UEdGraph*> GraphsAfter;
+			Blueprint->GetAllGraphs(GraphsAfter);
+			for (UEdGraph* Graph : GraphsAfter)
+			{
+				if (!Graph)
+				{
+					continue;
+				}
+				for (UEdGraphNode* Node : Graph->Nodes)
+				{
+					if (const UK2Node_Variable* VariableNode = Cast<UK2Node_Variable>(Node))
+					{
+						if (VariableNode->GetVarName() == NewVarName)
+						{
+							++ReferenceCountAfter;
+						}
+					}
+				}
+			}
+
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetStringField(TEXT("symbol_type"), Type);
+			Result->SetStringField(TEXT("old_name"), TrimmedOldName);
+			Result->SetStringField(TEXT("new_name"), NewVarName.ToString());
+			Result->SetNumberField(TEXT("reference_count_before"), ReferenceCountBefore);
+			Result->SetNumberField(TEXT("reference_count_after"), ReferenceCountAfter);
+			Result->SetObjectField(TEXT("variable"), BuildVariableJson(Blueprint, Blueprint->NewVariables[NewIndex]));
+			return Result;
+		}
+
+		if (Type == TEXT("function"))
+		{
+			if (TrimmedOldName.IsEmpty())
+			{
+				return Fail(TEXT("old_name is required for symbol_type=function"));
+			}
+
+			UEdGraph* FunctionGraph = FindFunctionGraphByName(Blueprint, TrimmedOldName);
+			if (!FunctionGraph)
+			{
+				return Fail(FString::Printf(TEXT("Function not found: %s"), *TrimmedOldName));
+			}
+			if (ResolveGraph(Blueprint, TrimmedNewName))
+			{
+				return Fail(FString::Printf(TEXT("A graph already exists with name: %s"), *TrimmedNewName));
+			}
+
+			const FName OldFunctionName(*TrimmedOldName);
+			int32 ReferenceCountBefore = 0;
+			TArray<UEdGraph*> GraphsBefore;
+			Blueprint->GetAllGraphs(GraphsBefore);
+			for (UEdGraph* Graph : GraphsBefore)
+			{
+				if (!Graph)
+				{
+					continue;
+				}
+				for (UEdGraphNode* Node : Graph->Nodes)
+				{
+					if (const UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node))
+					{
+						if (CallNode->GetFunctionName() == OldFunctionName)
+						{
+							++ReferenceCountBefore;
+						}
+					}
+				}
+			}
+
+			FBlueprintEditorUtils::RenameGraph(FunctionGraph, TrimmedNewName);
+			const FName NewFunctionName(*FunctionGraph->GetName());
+			FBlueprintEditorUtils::ReplaceFunctionReferences(Blueprint, OldFunctionName, NewFunctionName);
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+			int32 ReferenceCountAfter = 0;
+			TArray<UEdGraph*> GraphsAfter;
+			Blueprint->GetAllGraphs(GraphsAfter);
+			for (UEdGraph* Graph : GraphsAfter)
+			{
+				if (!Graph)
+				{
+					continue;
+				}
+				for (UEdGraphNode* Node : Graph->Nodes)
+				{
+					if (const UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node))
+					{
+						if (CallNode->GetFunctionName() == NewFunctionName)
+						{
+							++ReferenceCountAfter;
+						}
+					}
+				}
+			}
+
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetStringField(TEXT("symbol_type"), Type);
+			Result->SetStringField(TEXT("old_name"), TrimmedOldName);
+			Result->SetStringField(TEXT("new_name"), NewFunctionName.ToString());
+			Result->SetNumberField(TEXT("reference_count_before"), ReferenceCountBefore);
+			Result->SetNumberField(TEXT("reference_count_after"), ReferenceCountAfter);
+			Result->SetObjectField(TEXT("function"), BuildFunctionJson(Blueprint, FunctionGraph));
+			return Result;
+		}
+
+		if (Type == TEXT("node"))
+		{
+			const FString ResolvedNodeId = !TrimmedNodeId.IsEmpty() ? TrimmedNodeId : TrimmedOldName;
+			if (ResolvedNodeId.IsEmpty())
+			{
+				return Fail(TEXT("node_id is required for symbol_type=node"));
+			}
+
+			UEdGraph* Graph = ResolveGraph(Blueprint, TrimmedGraphName.IsEmpty() ? TEXT("EventGraph") : TrimmedGraphName);
+			if (!Graph)
+			{
+				return Fail(FString::Printf(TEXT("Graph not found: %s"), *TrimmedGraphName));
+			}
+
+			UEdGraphNode* Node = FindNodeById(Graph, ResolvedNodeId);
+			if (!Node)
+			{
+				return Fail(FString::Printf(TEXT("Node not found: %s"), *ResolvedNodeId));
+			}
+			if (!Node->GetCanRenameNode())
+			{
+				return Fail(FString::Printf(TEXT("Node does not support rename: %s"), *Node->GetClass()->GetName()));
+			}
+
+			const FString OldNodeTitle = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
+			Node->OnRenameNode(TrimmedNewName);
+			Node->ReconstructNode();
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetStringField(TEXT("symbol_type"), Type);
+			Result->SetStringField(TEXT("node_id"), ResolvedNodeId);
+			Result->SetStringField(TEXT("old_name"), OldNodeTitle);
+			Result->SetStringField(TEXT("new_name"), TrimmedNewName);
+			Result->SetObjectField(TEXT("node"), BuildNodeJson(Node));
+			return Result;
+		}
+
+		return Fail(FString::Printf(TEXT("Unsupported symbol_type '%s'. Supported: variable, function, node"), *SymbolType));
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleReplaceFunctionCalls(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString OldFunctionName;
+	FString NewFunctionName;
+	FString OldFunctionClassPath;
+	FString NewFunctionClassPath;
+	FString GraphName;
+
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("old_function_name"), OldFunctionName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'old_function_name'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("new_function_name"), NewFunctionName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'new_function_name'"));
+	}
+	Request.Params->TryGetStringField(TEXT("old_function_class"), OldFunctionClassPath);
+	Request.Params->TryGetStringField(TEXT("new_function_class"), NewFunctionClassPath);
+	Request.Params->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	auto Task = [BlueprintPath, OldFunctionName, NewFunctionName, OldFunctionClassPath, NewFunctionClassPath, GraphName]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		const FString TrimmedOldFunctionName = OldFunctionName.TrimStartAndEnd();
+		const FString TrimmedNewFunctionName = NewFunctionName.TrimStartAndEnd();
+		const FString TrimmedOldFunctionClassPath = OldFunctionClassPath.TrimStartAndEnd();
+		const FString TrimmedNewFunctionClassPath = NewFunctionClassPath.TrimStartAndEnd();
+		const FString GraphFilter = GraphName.TrimStartAndEnd();
+		if (TrimmedOldFunctionName.IsEmpty() || TrimmedNewFunctionName.IsEmpty())
+		{
+			return Fail(TEXT("old_function_name and new_function_name must be non-empty"));
+		}
+
+		UClass* OldFunctionClass = nullptr;
+		if (!TrimmedOldFunctionClassPath.IsEmpty())
+		{
+			OldFunctionClass = ResolveClass(TrimmedOldFunctionClassPath);
+			if (!OldFunctionClass)
+			{
+				return Fail(FString::Printf(TEXT("Old function class not found: %s"), *TrimmedOldFunctionClassPath));
+			}
+		}
+
+		UFunction* ReplacementFunction = nullptr;
+		UClass* ReplacementFunctionClass = nullptr;
+		if (!TrimmedNewFunctionClassPath.IsEmpty())
+		{
+			ReplacementFunctionClass = ResolveClass(TrimmedNewFunctionClassPath);
+			if (!ReplacementFunctionClass)
+			{
+				return Fail(FString::Printf(TEXT("Replacement function class not found: %s"), *TrimmedNewFunctionClassPath));
+			}
+			ReplacementFunction = ReplacementFunctionClass->FindFunctionByName(FName(*TrimmedNewFunctionName));
+		}
+		else
+		{
+			if (!ReplacementFunction && Blueprint->SkeletonGeneratedClass)
+			{
+				ReplacementFunction = Blueprint->SkeletonGeneratedClass->FindFunctionByName(FName(*TrimmedNewFunctionName));
+				ReplacementFunctionClass = Blueprint->SkeletonGeneratedClass;
+			}
+			if (!ReplacementFunction && Blueprint->GeneratedClass)
+			{
+				ReplacementFunction = Blueprint->GeneratedClass->FindFunctionByName(FName(*TrimmedNewFunctionName));
+				ReplacementFunctionClass = Blueprint->GeneratedClass;
+			}
+			if (!ReplacementFunction && Blueprint->ParentClass)
+			{
+				ReplacementFunction = Blueprint->ParentClass->FindFunctionByName(FName(*TrimmedNewFunctionName));
+				ReplacementFunctionClass = Blueprint->ParentClass;
+			}
+		}
+
+		if (!ReplacementFunction)
+		{
+			FString Error = FString::Printf(TEXT("Replacement function not found: %s"), *TrimmedNewFunctionName);
+			if (!TrimmedNewFunctionClassPath.IsEmpty())
+			{
+				Error += FString::Printf(TEXT(" (class: %s)"), *TrimmedNewFunctionClassPath);
+			}
+			return Fail(Error);
+		}
+
+		TArray<UEdGraph*> TargetGraphs;
+		if (!GraphFilter.IsEmpty())
+		{
+			UEdGraph* Graph = ResolveGraph(Blueprint, GraphFilter);
+			if (!Graph)
+			{
+				return Fail(FString::Printf(TEXT("Graph not found: %s"), *GraphFilter));
+			}
+			TargetGraphs.Add(Graph);
+		}
+		else
+		{
+			Blueprint->GetAllGraphs(TargetGraphs);
+		}
+
+		const FName OldFunctionFName(*TrimmedOldFunctionName);
+		TArray<UEdGraphNode*> ReplacedNodes;
+		for (UEdGraph* Graph : TargetGraphs)
+		{
+			if (!Graph)
+			{
+				continue;
+			}
+
+			for (UEdGraphNode* Node : Graph->Nodes)
+			{
+				UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node);
+				if (!CallNode || CallNode->GetFunctionName() != OldFunctionFName)
+				{
+					continue;
+				}
+
+				if (OldFunctionClass)
+				{
+					UClass* ExistingOwnerClass = nullptr;
+					if (UFunction* ExistingFunction = CallNode->GetTargetFunction())
+					{
+						ExistingOwnerClass = ExistingFunction->GetOwnerClass();
+					}
+					if (!ExistingOwnerClass)
+					{
+						UClass* SelfScopeClass = Blueprint->GeneratedClass ? Blueprint->GeneratedClass : Blueprint->SkeletonGeneratedClass;
+						ExistingOwnerClass = CallNode->FunctionReference.GetMemberParentClass(SelfScopeClass);
+					}
+					if (!ExistingOwnerClass || (!ExistingOwnerClass->IsChildOf(OldFunctionClass) && ExistingOwnerClass != OldFunctionClass))
+					{
+						continue;
+					}
+				}
+
+				CallNode->Modify();
+				CallNode->SetFromFunction(ReplacementFunction);
+				CallNode->ReconstructNode();
+				ReplacedNodes.Add(CallNode);
+			}
+		}
+
+		if (ReplacedNodes.Num() > 0)
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ReplacedNodesJson;
+		ReplacedNodesJson.Reserve(ReplacedNodes.Num());
+		for (UEdGraphNode* Node : ReplacedNodes)
+		{
+			if (!Node)
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> NodeObj = BuildNodeJson(Node);
+			NodeObj->SetStringField(TEXT("graph_name"), Node->GetGraph() ? Node->GetGraph()->GetName() : TEXT(""));
+			ReplacedNodesJson.Add(MakeShared<FJsonValueObject>(NodeObj));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("old_function_name"), TrimmedOldFunctionName);
+		Result->SetStringField(TEXT("new_function_name"), TrimmedNewFunctionName);
+		Result->SetStringField(TEXT("new_function_path"), ReplacementFunction->GetPathName());
+		Result->SetStringField(TEXT("new_function_class"), ReplacementFunctionClass ? ReplacementFunctionClass->GetPathName() : TEXT(""));
+		Result->SetBoolField(TEXT("changed"), ReplacedNodesJson.Num() > 0);
+		Result->SetArrayField(TEXT("replaced_nodes"), ReplacedNodesJson);
+		Result->SetNumberField(TEXT("replaced_count"), ReplacedNodesJson.Num());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleRemoveUnusedVariables(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	bool bDryRun = false;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("dry_run"), bDryRun);
+
+	auto Task = [BlueprintPath, bDryRun]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		TArray<FName> CandidateNames;
+		TArray<TSharedPtr<FJsonValue>> CandidateJson;
+		TArray<TSharedPtr<FJsonValue>> RemovedJson;
+		TArray<TSharedPtr<FJsonValue>> UsedJson;
+		TArray<TSharedPtr<FJsonValue>> SkippedJson;
+
+		for (const FBPVariableDescription& Variable : Blueprint->NewVariables)
+		{
+			const FString VariableName = Variable.VarName.ToString();
+			if (VariableName.IsEmpty())
+			{
+				continue;
+			}
+
+			if (FBlueprintEditorUtils::IsVariableComponent(Variable))
+			{
+				TSharedPtr<FJsonObject> Skipped = MakeShared<FJsonObject>();
+				Skipped->SetStringField(TEXT("variable_name"), VariableName);
+				Skipped->SetStringField(TEXT("reason"), TEXT("component_variable"));
+				SkippedJson.Add(MakeShared<FJsonValueObject>(Skipped));
+				continue;
+			}
+			if (Variable.VarType.PinCategory == UEdGraphSchema_K2::PC_MCDelegate)
+			{
+				TSharedPtr<FJsonObject> Skipped = MakeShared<FJsonObject>();
+				Skipped->SetStringField(TEXT("variable_name"), VariableName);
+				Skipped->SetStringField(TEXT("reason"), TEXT("event_dispatcher"));
+				SkippedJson.Add(MakeShared<FJsonValueObject>(Skipped));
+				continue;
+			}
+
+			if (FBlueprintEditorUtils::IsVariableUsed(Blueprint, Variable.VarName))
+			{
+				UsedJson.Add(MakeShared<FJsonValueString>(VariableName));
+				continue;
+			}
+
+			CandidateNames.Add(Variable.VarName);
+			CandidateJson.Add(MakeShared<FJsonValueString>(VariableName));
+		}
+
+		if (!bDryRun)
+		{
+			for (const FName VariableName : CandidateNames)
+			{
+				if (FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, VariableName) == INDEX_NONE)
+				{
+					continue;
+				}
+
+				FBlueprintEditorUtils::RemoveMemberVariable(Blueprint, VariableName);
+				if (FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, VariableName) == INDEX_NONE)
+				{
+					RemovedJson.Add(MakeShared<FJsonValueString>(VariableName.ToString()));
+				}
+			}
+		}
+
+		if (!bDryRun && RemovedJson.Num() > 0)
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetBoolField(TEXT("dry_run"), bDryRun);
+		Result->SetArrayField(TEXT("unused_variables"), CandidateJson);
+		Result->SetArrayField(TEXT("removed_variables"), RemovedJson);
+		Result->SetArrayField(TEXT("used_variables"), UsedJson);
+		Result->SetArrayField(TEXT("skipped_variables"), SkippedJson);
+		Result->SetNumberField(TEXT("unused_count"), CandidateJson.Num());
+		Result->SetNumberField(TEXT("removed_count"), RemovedJson.Num());
+		Result->SetNumberField(TEXT("used_count"), UsedJson.Num());
+		Result->SetNumberField(TEXT("skipped_count"), SkippedJson.Num());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleRemoveUnusedFunctions(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	bool bDryRun = false;
+	bool bIncludeOverrides = false;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("dry_run"), bDryRun);
+	Request.Params->TryGetBoolField(TEXT("include_overrides"), bIncludeOverrides);
+
+	auto Task = [BlueprintPath, bDryRun, bIncludeOverrides]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		TArray<FString> CandidateNames;
+		TArray<TSharedPtr<FJsonValue>> CandidateJson;
+		TArray<TSharedPtr<FJsonValue>> RemovedJson;
+		TArray<TSharedPtr<FJsonValue>> UsedJson;
+		TArray<TSharedPtr<FJsonValue>> SkippedJson;
+
+		for (UEdGraph* FunctionGraph : Blueprint->FunctionGraphs)
+		{
+			if (!FunctionGraph)
+			{
+				continue;
+			}
+
+			const FString FunctionName = FunctionGraph->GetName();
+			const FName FunctionFName(*FunctionName);
+			UClass* OverrideFunctionClass = FBlueprintEditorUtils::GetOverrideFunctionClass(Blueprint, FunctionFName);
+			const bool bIsOverrideFunction = OverrideFunctionClass != nullptr
+				&& OverrideFunctionClass != Blueprint->SkeletonGeneratedClass
+				&& OverrideFunctionClass != Blueprint->GeneratedClass;
+			if (!bIncludeOverrides && bIsOverrideFunction)
+			{
+				TSharedPtr<FJsonObject> Skipped = MakeShared<FJsonObject>();
+				Skipped->SetStringField(TEXT("function_name"), FunctionName);
+				Skipped->SetStringField(TEXT("reason"), TEXT("override_or_interface_function"));
+				SkippedJson.Add(MakeShared<FJsonValueObject>(Skipped));
+				continue;
+			}
+
+			if (FBlueprintEditorUtils::IsFunctionUsed(Blueprint, FunctionFName))
+			{
+				UsedJson.Add(MakeShared<FJsonValueString>(FunctionName));
+				continue;
+			}
+
+			CandidateNames.Add(FunctionName);
+			CandidateJson.Add(MakeShared<FJsonValueString>(FunctionName));
+		}
+
+		if (!bDryRun)
+		{
+			for (const FString& FunctionName : CandidateNames)
+			{
+				UEdGraph* FunctionGraph = FindFunctionGraphByName(Blueprint, FunctionName);
+				if (!FunctionGraph)
+				{
+					continue;
+				}
+
+				FBlueprintEditorUtils::RemoveGraph(Blueprint, FunctionGraph, EGraphRemoveFlags::Default);
+				if (!FindFunctionGraphByName(Blueprint, FunctionName))
+				{
+					RemovedJson.Add(MakeShared<FJsonValueString>(FunctionName));
+				}
+			}
+		}
+
+		if (!bDryRun && RemovedJson.Num() > 0)
+		{
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetBoolField(TEXT("dry_run"), bDryRun);
+		Result->SetBoolField(TEXT("include_overrides"), bIncludeOverrides);
+		Result->SetArrayField(TEXT("unused_functions"), CandidateJson);
+		Result->SetArrayField(TEXT("removed_functions"), RemovedJson);
+		Result->SetArrayField(TEXT("used_functions"), UsedJson);
+		Result->SetArrayField(TEXT("skipped_functions"), SkippedJson);
+		Result->SetNumberField(TEXT("unused_count"), CandidateJson.Num());
+		Result->SetNumberField(TEXT("removed_count"), RemovedJson.Num());
+		Result->SetNumberField(TEXT("used_count"), UsedJson.Num());
+		Result->SetNumberField(TEXT("skipped_count"), SkippedJson.Num());
 		return Result;
 	};
 

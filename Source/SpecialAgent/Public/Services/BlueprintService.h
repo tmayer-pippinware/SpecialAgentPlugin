@@ -101,6 +101,11 @@ private:
 	FMCPResponse HandleSplitStructPin(const FMCPRequest& Request);
 	FMCPResponse HandleRecombineStructPin(const FMCPRequest& Request);
 	FMCPResponse HandlePromotePinToVariable(const FMCPRequest& Request);
+	FMCPResponse HandleFindReferences(const FMCPRequest& Request);
+	FMCPResponse HandleRenameSymbol(const FMCPRequest& Request);
+	FMCPResponse HandleReplaceFunctionCalls(const FMCPRequest& Request);
+	FMCPResponse HandleRemoveUnusedVariables(const FMCPRequest& Request);
+	FMCPResponse HandleRemoveUnusedFunctions(const FMCPRequest& Request);
 	FMCPResponse HandleSetPinDefaultValue(const FMCPRequest& Request);
 	FMCPResponse HandleConnectPins(const FMCPRequest& Request);
 	FMCPResponse HandleCompileBlueprint(const FMCPRequest& Request);

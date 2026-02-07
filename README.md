@@ -130,6 +130,11 @@ Native Blueprint graph tools for node-based authoring workflows:
 - `blueprint/split_struct_pin`
 - `blueprint/recombine_struct_pin`
 - `blueprint/promote_pin_to_variable`
+- `blueprint/find_references`
+- `blueprint/rename_symbol`
+- `blueprint/replace_function_calls`
+- `blueprint/remove_unused_variables`
+- `blueprint/remove_unused_functions`
 
 ### Visual Feedback Loop
 
@@ -215,7 +220,7 @@ Your AI assistant now has access to:
 | Service | Methods | Description |
 |---------|:-------:|-------------|
 | **Python** | 3 | Execute scripts, run files, list modules |
-| **Blueprint** | 76 | Blueprint asset lifecycle, graph management, variable authoring, component SCS authoring, function/macro/dispatcher authoring, node authoring, pin operations, and compile support |
+| **Blueprint** | 81 | Blueprint asset lifecycle, graph management, variable authoring, component SCS authoring, function/macro/dispatcher authoring, node authoring, pin operations, refactor/symbol operations, and compile support |
 | **Screenshot** | 2 | Capture viewport for AI vision |
 | **World** | 30+ | Actor manipulation and spatial queries |
 | **Assets** | 4 | Content Browser search and inspection |
