@@ -106,6 +106,11 @@ private:
 	FMCPResponse HandleReplaceFunctionCalls(const FMCPRequest& Request);
 	FMCPResponse HandleRemoveUnusedVariables(const FMCPRequest& Request);
 	FMCPResponse HandleRemoveUnusedFunctions(const FMCPRequest& Request);
+	FMCPResponse HandleGetCompileResult(const FMCPRequest& Request);
+	FMCPResponse HandleValidateBlueprint(const FMCPRequest& Request);
+	FMCPResponse HandleRefreshAllNodes(const FMCPRequest& Request);
+	FMCPResponse HandleGetBlueprintStatus(const FMCPRequest& Request);
+	FMCPResponse HandleListBlueprintWarnings(const FMCPRequest& Request);
 	FMCPResponse HandleSetPinDefaultValue(const FMCPRequest& Request);
 	FMCPResponse HandleConnectPins(const FMCPRequest& Request);
 	FMCPResponse HandleCompileBlueprint(const FMCPRequest& Request);

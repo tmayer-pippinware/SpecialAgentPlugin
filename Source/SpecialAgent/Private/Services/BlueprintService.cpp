@@ -7,8 +7,10 @@
 #include "BlueprintEditorLibrary.h"
 #include "EditorAssetLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "EdGraphUtilities.h"
+#include "EdGraphToken.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -38,6 +40,7 @@
 #include "Components/SceneComponent.h"
 #include "UObject/CoreNetTypes.h"
 #include "UObject/UObjectIterator.h"
+#include "Misc/DataValidation.h"
 #include "Misc/PackageName.h"
 
 namespace
@@ -381,6 +384,132 @@ namespace
 		}
 		PinObj->SetArrayField(TEXT("linked_to"), LinkedToJson);
 		return PinObj;
+	}
+
+	static FString MessageSeverityToString(const EMessageSeverity::Type Severity)
+	{
+		switch (Severity)
+		{
+			case EMessageSeverity::Error:
+				return TEXT("error");
+			case EMessageSeverity::Warning:
+				return TEXT("warning");
+			case EMessageSeverity::PerformanceWarning:
+				return TEXT("performance_warning");
+			case EMessageSeverity::Info:
+				return TEXT("info");
+			default:
+				return TEXT("unknown");
+		}
+	}
+
+	static FString DataValidationResultToString(const EDataValidationResult Result)
+	{
+		switch (Result)
+		{
+			case EDataValidationResult::Valid:
+				return TEXT("valid");
+			case EDataValidationResult::Invalid:
+				return TEXT("invalid");
+			case EDataValidationResult::NotValidated:
+				return TEXT("not_validated");
+			default:
+				return TEXT("not_validated");
+		}
+	}
+
+	static TSharedPtr<FJsonObject> BuildTokenizedMessageJson(const TSharedRef<FTokenizedMessage>& Message)
+	{
+		TSharedPtr<FJsonObject> MessageObj = MakeShared<FJsonObject>();
+		MessageObj->SetStringField(TEXT("severity"), MessageSeverityToString(Message->GetSeverity()));
+		MessageObj->SetNumberField(TEXT("severity_code"), static_cast<int32>(Message->GetSeverity()));
+		MessageObj->SetStringField(TEXT("text"), Message->ToText().ToString());
+
+		TArray<TSharedPtr<FJsonValue>> NodesJson;
+		TSet<FGuid> SeenNodeGuids;
+		for (const TSharedRef<IMessageToken>& Token : Message->GetMessageTokens())
+		{
+			if (Token->GetType() != EMessageToken::EdGraph)
+			{
+				continue;
+			}
+
+			const TSharedRef<FEdGraphToken> GraphToken = StaticCastSharedRef<FEdGraphToken>(Token);
+			const UEdGraphPin* ReferencedPin = GraphToken->GetPin();
+			const UObject* ReferencedObject = GraphToken->GetGraphObject();
+
+			const UEdGraphNode* Node = nullptr;
+			if (ReferencedPin)
+			{
+				Node = ReferencedPin->GetOwningNodeUnchecked();
+			}
+			if (!Node)
+			{
+				Node = Cast<const UEdGraphNode>(ReferencedObject);
+			}
+
+			if (!Node || SeenNodeGuids.Contains(Node->NodeGuid))
+			{
+				continue;
+			}
+			SeenNodeGuids.Add(Node->NodeGuid);
+
+			TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
+			NodeObj->SetStringField(TEXT("node_id"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+			NodeObj->SetStringField(TEXT("node_title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+			NodeObj->SetStringField(TEXT("node_class"), Node->GetClass()->GetName());
+			NodeObj->SetNumberField(TEXT("x"), Node->NodePosX);
+			NodeObj->SetNumberField(TEXT("y"), Node->NodePosY);
+			if (Node->GetGraph())
+			{
+				NodeObj->SetStringField(TEXT("graph_name"), Node->GetGraph()->GetName());
+				NodeObj->SetStringField(TEXT("graph_path"), Node->GetGraph()->GetPathName());
+			}
+			if (ReferencedPin)
+			{
+				NodeObj->SetStringField(TEXT("pin_name"), ReferencedPin->PinName.ToString());
+				NodeObj->SetStringField(TEXT("pin_path"), BuildPinPath(ReferencedPin));
+			}
+			if (ReferencedObject)
+			{
+				NodeObj->SetStringField(TEXT("source_object_path"), ReferencedObject->GetPathName());
+			}
+
+			NodesJson.Add(MakeShared<FJsonValueObject>(NodeObj));
+		}
+
+		MessageObj->SetArrayField(TEXT("nodes"), NodesJson);
+		MessageObj->SetBoolField(TEXT("has_node_context"), NodesJson.Num() > 0);
+		return MessageObj;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> BuildCompilerMessagesJson(const FCompilerResultsLog& CompilerLog, int32 MaxMessages = INDEX_NONE)
+	{
+		TArray<TSharedPtr<FJsonValue>> MessagesJson;
+		const int32 MessageLimit = MaxMessages >= 0 ? FMath::Min(MaxMessages, CompilerLog.Messages.Num()) : CompilerLog.Messages.Num();
+		MessagesJson.Reserve(MessageLimit);
+
+		for (int32 MessageIndex = 0; MessageIndex < MessageLimit; ++MessageIndex)
+		{
+			MessagesJson.Add(MakeShared<FJsonValueObject>(BuildTokenizedMessageJson(CompilerLog.Messages[MessageIndex])));
+		}
+		return MessagesJson;
+	}
+
+	static TSharedPtr<FJsonObject> BuildValidationIssueJson(const FDataValidationContext::FIssue& Issue)
+	{
+		if (Issue.TokenizedMessage.IsValid())
+		{
+			return BuildTokenizedMessageJson(Issue.TokenizedMessage.ToSharedRef());
+		}
+
+		TSharedPtr<FJsonObject> IssueObj = MakeShared<FJsonObject>();
+		IssueObj->SetStringField(TEXT("severity"), MessageSeverityToString(Issue.Severity));
+		IssueObj->SetNumberField(TEXT("severity_code"), static_cast<int32>(Issue.Severity));
+		IssueObj->SetStringField(TEXT("text"), Issue.Message.ToString());
+		IssueObj->SetArrayField(TEXT("nodes"), TArray<TSharedPtr<FJsonValue>>());
+		IssueObj->SetBoolField(TEXT("has_node_context"), false);
+		return IssueObj;
 	}
 
 	static bool ParsePinContainerType(const FString& ContainerTypeName, EPinContainerType& OutContainerType, FString& OutError)
@@ -4455,6 +4584,111 @@ TArray<FMCPToolInfo> FBlueprintService::GetAvailableTools() const
 
 	{
 		FMCPToolInfo Tool;
+		Tool.Name = TEXT("get_compile_result");
+		Tool.Description = TEXT("Compile Blueprint and return compile diagnostics with message/node context.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> CompileParam = MakeShared<FJsonObject>();
+		CompileParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		CompileParam->SetStringField(TEXT("description"), TEXT("If true (default), compile before returning diagnostics."));
+		Tool.Parameters->SetObjectField(TEXT("compile"), CompileParam);
+
+		TSharedPtr<FJsonObject> MaxMessagesParam = MakeShared<FJsonObject>();
+		MaxMessagesParam->SetStringField(TEXT("type"), TEXT("number"));
+		MaxMessagesParam->SetStringField(TEXT("description"), TEXT("Optional maximum number of messages to return."));
+		Tool.Parameters->SetObjectField(TEXT("max_messages"), MaxMessagesParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("validate_blueprint");
+		Tool.Description = TEXT("Run compile + data validation checks and return validation issues.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> CompileParam = MakeShared<FJsonObject>();
+		CompileParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		CompileParam->SetStringField(TEXT("description"), TEXT("If true (default), compile prior to validation."));
+		Tool.Parameters->SetObjectField(TEXT("compile"), CompileParam);
+
+		TSharedPtr<FJsonObject> IncludeMessagesParam = MakeShared<FJsonObject>();
+		IncludeMessagesParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		IncludeMessagesParam->SetStringField(TEXT("description"), TEXT("Include compile messages in response (default: true)."));
+		Tool.Parameters->SetObjectField(TEXT("include_compile_messages"), IncludeMessagesParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("refresh_all_nodes");
+		Tool.Description = TEXT("Refresh/reconstruct all Blueprint nodes and optionally compile.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> CompileParam = MakeShared<FJsonObject>();
+		CompileParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		CompileParam->SetStringField(TEXT("description"), TEXT("If true, compile after refresh."));
+		Tool.Parameters->SetObjectField(TEXT("compile_after_refresh"), CompileParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("get_blueprint_status");
+		Tool.Description = TEXT("Get high-level Blueprint status flags and validation/compile counters.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("list_blueprint_warnings");
+		Tool.Description = TEXT("Compile Blueprint (optional) and return warning/performance-warning messages.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> CompileParam = MakeShared<FJsonObject>();
+		CompileParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		CompileParam->SetStringField(TEXT("description"), TEXT("If true (default), compile before collecting warnings."));
+		Tool.Parameters->SetObjectField(TEXT("compile"), CompileParam);
+
+		TSharedPtr<FJsonObject> MaxResultsParam = MakeShared<FJsonObject>();
+		MaxResultsParam->SetStringField(TEXT("type"), TEXT("number"));
+		MaxResultsParam->SetStringField(TEXT("description"), TEXT("Optional maximum warning count to return."));
+		Tool.Parameters->SetObjectField(TEXT("max_results"), MaxResultsParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
 		Tool.Name = TEXT("set_pin_default_value");
 		Tool.Description = TEXT("Set a node pin default value string.");
 
@@ -4630,6 +4864,11 @@ FMCPResponse FBlueprintService::HandleRequest(const FMCPRequest& Request, const 
 	if (MethodName == TEXT("replace_function_calls")) return HandleReplaceFunctionCalls(Request);
 	if (MethodName == TEXT("remove_unused_variables")) return HandleRemoveUnusedVariables(Request);
 	if (MethodName == TEXT("remove_unused_functions")) return HandleRemoveUnusedFunctions(Request);
+	if (MethodName == TEXT("get_compile_result")) return HandleGetCompileResult(Request);
+	if (MethodName == TEXT("validate_blueprint")) return HandleValidateBlueprint(Request);
+	if (MethodName == TEXT("refresh_all_nodes")) return HandleRefreshAllNodes(Request);
+	if (MethodName == TEXT("get_blueprint_status")) return HandleGetBlueprintStatus(Request);
+	if (MethodName == TEXT("list_blueprint_warnings")) return HandleListBlueprintWarnings(Request);
 	if (MethodName == TEXT("set_pin_default_value")) return HandleSetPinDefaultValue(Request);
 	if (MethodName == TEXT("connect_pins")) return HandleConnectPins(Request);
 	if (MethodName == TEXT("compile_blueprint")) return HandleCompileBlueprint(Request);
@@ -12910,6 +13149,425 @@ FMCPResponse FBlueprintService::HandleRemoveUnusedFunctions(const FMCPRequest& R
 		Result->SetNumberField(TEXT("removed_count"), RemovedJson.Num());
 		Result->SetNumberField(TEXT("used_count"), UsedJson.Num());
 		Result->SetNumberField(TEXT("skipped_count"), SkippedJson.Num());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleGetCompileResult(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	bool bCompile = true;
+	int32 MaxMessages = INDEX_NONE;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+	double MaxMessagesNumber = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("max_messages"), MaxMessagesNumber))
+	{
+		if (MaxMessagesNumber < 0.0)
+		{
+			return InvalidParams(Request.Id, TEXT("'max_messages' must be >= 0"));
+		}
+		MaxMessages = FMath::FloorToInt(MaxMessagesNumber);
+	}
+
+	auto Task = [BlueprintPath, bCompile, MaxMessages]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		FCompilerResultsLog CompilerLog;
+		if (bCompile)
+		{
+			FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+		}
+
+		const int32 TotalMessageCount = CompilerLog.Messages.Num();
+		const int32 ReturnedMessageCount = MaxMessages >= 0 ? FMath::Min(MaxMessages, TotalMessageCount) : TotalMessageCount;
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetBoolField(TEXT("compiled"), bCompile);
+		Result->SetNumberField(TEXT("status"), static_cast<int32>(Blueprint->Status));
+		Result->SetStringField(TEXT("status_name"), BlueprintStatusToString(Blueprint->Status));
+		Result->SetBoolField(TEXT("is_up_to_date"), Blueprint->IsUpToDate());
+		Result->SetBoolField(TEXT("has_errors"), CompilerLog.NumErrors > 0);
+		Result->SetBoolField(TEXT("has_warnings"), CompilerLog.NumWarnings > 0);
+		Result->SetNumberField(TEXT("num_errors"), CompilerLog.NumErrors);
+		Result->SetNumberField(TEXT("num_warnings"), CompilerLog.NumWarnings);
+		Result->SetNumberField(TEXT("message_count"), TotalMessageCount);
+		Result->SetNumberField(TEXT("returned_message_count"), ReturnedMessageCount);
+		Result->SetArrayField(TEXT("messages"), BuildCompilerMessagesJson(CompilerLog, MaxMessages));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleValidateBlueprint(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	bool bCompile = true;
+	bool bIncludeCompileMessages = true;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("compile"), bCompile);
+	Request.Params->TryGetBoolField(TEXT("include_compile_messages"), bIncludeCompileMessages);
+
+	auto Task = [BlueprintPath, bCompile, bIncludeCompileMessages]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		FCompilerResultsLog CompilerLog;
+		if (bCompile)
+		{
+			FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+		}
+
+		FDataValidationContext ValidationContext;
+		const EDataValidationResult ValidationResult = Blueprint->IsDataValid(ValidationContext);
+		const bool bGeneratedClassValid = Blueprint->GeneratedClass ? UBlueprint::ValidateGeneratedClass(Blueprint->GeneratedClass) : false;
+
+		TArray<TSharedPtr<FJsonValue>> ValidationIssues;
+		ValidationIssues.Reserve(ValidationContext.GetIssues().Num());
+		for (const FDataValidationContext::FIssue& Issue : ValidationContext.GetIssues())
+		{
+			ValidationIssues.Add(MakeShared<FJsonValueObject>(BuildValidationIssueJson(Issue)));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetBoolField(TEXT("compiled"), bCompile);
+		Result->SetNumberField(TEXT("status"), static_cast<int32>(Blueprint->Status));
+		Result->SetStringField(TEXT("status_name"), BlueprintStatusToString(Blueprint->Status));
+		Result->SetNumberField(TEXT("validation_result"), static_cast<int32>(ValidationResult));
+		Result->SetStringField(TEXT("validation_result_name"), DataValidationResultToString(ValidationResult));
+		Result->SetBoolField(TEXT("generated_class_valid"), bGeneratedClassValid);
+		Result->SetNumberField(TEXT("compile_num_errors"), CompilerLog.NumErrors);
+		Result->SetNumberField(TEXT("compile_num_warnings"), CompilerLog.NumWarnings);
+		Result->SetNumberField(TEXT("compile_message_count"), CompilerLog.Messages.Num());
+		Result->SetNumberField(TEXT("validation_num_errors"), ValidationContext.GetNumErrors());
+		Result->SetNumberField(TEXT("validation_num_warnings"), ValidationContext.GetNumWarnings());
+		Result->SetNumberField(TEXT("validation_issue_count"), ValidationIssues.Num());
+		Result->SetArrayField(TEXT("validation_issues"), ValidationIssues);
+		Result->SetBoolField(
+			TEXT("is_valid"),
+			CompilerLog.NumErrors == 0
+			&& ValidationResult == EDataValidationResult::Valid
+			&& bGeneratedClassValid
+		);
+
+		if (bIncludeCompileMessages)
+		{
+			Result->SetArrayField(TEXT("compile_messages"), BuildCompilerMessagesJson(CompilerLog));
+		}
+
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleRefreshAllNodes(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	bool bCompileAfterRefresh = false;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("compile_after_refresh"), bCompileAfterRefresh);
+
+	auto Task = [BlueprintPath, bCompileAfterRefresh]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		FBlueprintEditorUtils::RefreshAllNodes(Blueprint);
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		TArray<UEdGraph*> AllGraphs;
+		Blueprint->GetAllGraphs(AllGraphs);
+		int32 TotalNodeCount = 0;
+		for (UEdGraph* Graph : AllGraphs)
+		{
+			if (Graph)
+			{
+				TotalNodeCount += Graph->Nodes.Num();
+			}
+		}
+
+		FCompilerResultsLog CompilerLog;
+		if (bCompileAfterRefresh)
+		{
+			FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetBoolField(TEXT("refreshed"), true);
+		Result->SetBoolField(TEXT("compiled"), bCompileAfterRefresh);
+		Result->SetNumberField(TEXT("status"), static_cast<int32>(Blueprint->Status));
+		Result->SetStringField(TEXT("status_name"), BlueprintStatusToString(Blueprint->Status));
+		Result->SetNumberField(TEXT("graph_count"), AllGraphs.Num());
+		Result->SetNumberField(TEXT("node_count"), TotalNodeCount);
+		Result->SetNumberField(TEXT("num_errors"), CompilerLog.NumErrors);
+		Result->SetNumberField(TEXT("num_warnings"), CompilerLog.NumWarnings);
+		Result->SetNumberField(TEXT("message_count"), CompilerLog.Messages.Num());
+		Result->SetArrayField(TEXT("messages"), BuildCompilerMessagesJson(CompilerLog));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleGetBlueprintStatus(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+
+	auto Task = [BlueprintPath]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		TArray<UEdGraph*> AllGraphs;
+		Blueprint->GetAllGraphs(AllGraphs);
+		int32 TotalNodeCount = 0;
+		for (UEdGraph* Graph : AllGraphs)
+		{
+			if (Graph)
+			{
+				TotalNodeCount += Graph->Nodes.Num();
+			}
+		}
+
+		int32 ComponentCount = 0;
+		if (Blueprint->SimpleConstructionScript)
+		{
+			const TArray<USCS_Node*>& SCSNodes = Blueprint->SimpleConstructionScript->GetAllNodes();
+			ComponentCount = SCSNodes.Num();
+		}
+
+		FDataValidationContext ValidationContext;
+		const EDataValidationResult ValidationResult = Blueprint->IsDataValid(ValidationContext);
+		const bool bGeneratedClassValid = Blueprint->GeneratedClass ? UBlueprint::ValidateGeneratedClass(Blueprint->GeneratedClass) : false;
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetNumberField(TEXT("status"), static_cast<int32>(Blueprint->Status));
+		Result->SetStringField(TEXT("status_name"), BlueprintStatusToString(Blueprint->Status));
+		Result->SetBoolField(TEXT("is_up_to_date"), Blueprint->IsUpToDate());
+		Result->SetBoolField(TEXT("is_possibly_dirty"), Blueprint->IsPossiblyDirty());
+		Result->SetBoolField(TEXT("package_dirty"), Blueprint->GetOutermost() ? Blueprint->GetOutermost()->IsDirty() : false);
+		Result->SetBoolField(TEXT("last_compile_failed"), Blueprint->Status == BS_Error);
+		Result->SetBoolField(TEXT("last_compile_had_warnings"), Blueprint->Status == BS_UpToDateWithWarnings);
+		Result->SetBoolField(TEXT("needs_recompile"), !Blueprint->IsUpToDate());
+		Result->SetBoolField(TEXT("is_data_only"), FBlueprintEditorUtils::IsDataOnlyBlueprint(Blueprint));
+		Result->SetBoolField(TEXT("generated_class_valid"), bGeneratedClassValid);
+		Result->SetNumberField(TEXT("validation_result"), static_cast<int32>(ValidationResult));
+		Result->SetStringField(TEXT("validation_result_name"), DataValidationResultToString(ValidationResult));
+		Result->SetNumberField(TEXT("validation_num_errors"), ValidationContext.GetNumErrors());
+		Result->SetNumberField(TEXT("validation_num_warnings"), ValidationContext.GetNumWarnings());
+		Result->SetNumberField(TEXT("graph_count"), AllGraphs.Num());
+		Result->SetNumberField(TEXT("node_count"), TotalNodeCount);
+		Result->SetNumberField(TEXT("variable_count"), Blueprint->NewVariables.Num());
+		Result->SetNumberField(TEXT("event_graph_count"), Blueprint->EventGraphs.Num());
+		Result->SetNumberField(TEXT("function_graph_count"), Blueprint->FunctionGraphs.Num());
+		Result->SetNumberField(TEXT("macro_graph_count"), Blueprint->MacroGraphs.Num());
+		Result->SetNumberField(TEXT("component_count"), ComponentCount);
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleListBlueprintWarnings(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	bool bCompile = true;
+	int32 MaxResults = INDEX_NONE;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+	double MaxResultsNumber = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("max_results"), MaxResultsNumber))
+	{
+		if (MaxResultsNumber < 0.0)
+		{
+			return InvalidParams(Request.Id, TEXT("'max_results' must be >= 0"));
+		}
+		MaxResults = FMath::FloorToInt(MaxResultsNumber);
+	}
+
+	auto Task = [BlueprintPath, bCompile, MaxResults]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		FCompilerResultsLog CompilerLog;
+		if (bCompile)
+		{
+			FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+		}
+
+		FDataValidationContext ValidationContext;
+		const EDataValidationResult ValidationResult = Blueprint->IsDataValid(ValidationContext);
+
+		TArray<TSharedPtr<FJsonValue>> WarningsJson;
+		int32 CompileWarningCount = 0;
+		for (const TSharedRef<FTokenizedMessage>& Message : CompilerLog.Messages)
+		{
+			const EMessageSeverity::Type Severity = Message->GetSeverity();
+			const bool bIsWarning = Severity == EMessageSeverity::Warning || Severity == EMessageSeverity::PerformanceWarning;
+			if (!bIsWarning)
+			{
+				continue;
+			}
+
+			++CompileWarningCount;
+			if (MaxResults < 0 || WarningsJson.Num() < MaxResults)
+			{
+				WarningsJson.Add(MakeShared<FJsonValueObject>(BuildTokenizedMessageJson(Message)));
+			}
+		}
+
+		int32 ValidationWarningCount = 0;
+		int32 ValidationErrorCount = 0;
+		for (const FDataValidationContext::FIssue& Issue : ValidationContext.GetIssues())
+		{
+			const bool bIsWarning = Issue.Severity == EMessageSeverity::Warning || Issue.Severity == EMessageSeverity::PerformanceWarning;
+			const bool bIsError = Issue.Severity == EMessageSeverity::Error;
+
+			if (bIsWarning)
+			{
+				++ValidationWarningCount;
+				if (MaxResults < 0 || WarningsJson.Num() < MaxResults)
+				{
+					WarningsJson.Add(MakeShared<FJsonValueObject>(BuildValidationIssueJson(Issue)));
+				}
+			}
+			else if (bIsError)
+			{
+				++ValidationErrorCount;
+			}
+		}
+
+		const int32 TotalWarningCount = CompileWarningCount + ValidationWarningCount;
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetBoolField(TEXT("compiled"), bCompile);
+		Result->SetNumberField(TEXT("status"), static_cast<int32>(Blueprint->Status));
+		Result->SetStringField(TEXT("status_name"), BlueprintStatusToString(Blueprint->Status));
+		Result->SetNumberField(TEXT("validation_result"), static_cast<int32>(ValidationResult));
+		Result->SetStringField(TEXT("validation_result_name"), DataValidationResultToString(ValidationResult));
+		Result->SetNumberField(TEXT("compile_error_count"), CompilerLog.NumErrors);
+		Result->SetNumberField(TEXT("compile_warning_count"), CompileWarningCount);
+		Result->SetNumberField(TEXT("validation_error_count"), ValidationErrorCount);
+		Result->SetNumberField(TEXT("validation_warning_count"), ValidationWarningCount);
+		Result->SetNumberField(TEXT("warning_count"), TotalWarningCount);
+		Result->SetNumberField(TEXT("returned_warning_count"), WarningsJson.Num());
+		Result->SetArrayField(TEXT("warnings"), WarningsJson);
 		return Result;
 	};
 
