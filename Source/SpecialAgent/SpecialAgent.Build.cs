@@ -61,6 +61,7 @@ public class SpecialAgent : ModuleRules
 				"ToolMenus",
 				"BlueprintGraph",
 				"BlueprintEditorLibrary",
+				"MaterialEditor",
 			}
 		);
 		
