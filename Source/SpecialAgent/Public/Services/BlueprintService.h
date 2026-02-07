@@ -117,6 +117,11 @@ private:
 	FMCPResponse HandleListOverridableFunctions(const FMCPRequest& Request);
 	FMCPResponse HandleOverrideFunction(const FMCPRequest& Request);
 	FMCPResponse HandleImplementInterfaceFunction(const FMCPRequest& Request);
+	FMCPResponse HandleBeginTransaction(const FMCPRequest& Request);
+	FMCPResponse HandleEndTransaction(const FMCPRequest& Request);
+	FMCPResponse HandleCancelTransaction(const FMCPRequest& Request);
+	FMCPResponse HandleDryRunValidate(const FMCPRequest& Request);
+	FMCPResponse HandleCapabilities(const FMCPRequest& Request);
 	FMCPResponse HandleSetPinDefaultValue(const FMCPRequest& Request);
 	FMCPResponse HandleConnectPins(const FMCPRequest& Request);
 	FMCPResponse HandleCompileBlueprint(const FMCPRequest& Request);
@@ -128,4 +133,16 @@ private:
 	static UEdGraph* ResolveGraph(UBlueprint* Blueprint, const FString& GraphName);
 	static UEdGraphNode* FindNodeById(UEdGraph* Graph, const FString& NodeId);
 	static UEdGraphPin* FindPinByName(UEdGraphNode* Node, const FString& PinName);
+
+	struct FBlueprintTransactionState
+	{
+		FString TransactionId;
+		FString BlueprintPath;
+		int32 TransactionIndex = INDEX_NONE;
+		FString Description;
+		FDateTime StartedAtUtc;
+	};
+
+	TOptional<FBlueprintTransactionState> ActiveTransaction;
+	int32 TransactionSequence = 0;
 };

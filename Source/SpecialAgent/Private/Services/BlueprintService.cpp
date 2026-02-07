@@ -6,6 +6,10 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "BlueprintEditorLibrary.h"
 #include "EditorAssetLibrary.h"
+#include "Editor.h"
+#include "UnrealEdGlobals.h"
+#include "Editor/UnrealEdEngine.h"
+#include "Editor/Transactor.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -41,6 +45,7 @@
 #include "UObject/CoreNetTypes.h"
 #include "UObject/UObjectIterator.h"
 #include "Misc/DataValidation.h"
+#include "Misc/EngineVersion.h"
 #include "Misc/PackageName.h"
 
 namespace
@@ -4848,6 +4853,82 @@ TArray<FMCPToolInfo> FBlueprintService::GetAvailableTools() const
 
 	{
 		FMCPToolInfo Tool;
+		Tool.Name = TEXT("begin_transaction");
+		Tool.Description = TEXT("Begin a managed Blueprint edit transaction for safe batched changes.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path associated with this transaction."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> DescriptionParam = MakeShared<FJsonObject>();
+		DescriptionParam->SetStringField(TEXT("type"), TEXT("string"));
+		DescriptionParam->SetStringField(TEXT("description"), TEXT("Human-readable transaction description."));
+		Tool.Parameters->SetObjectField(TEXT("description"), DescriptionParam);
+
+		TSharedPtr<FJsonObject> ContextParam = MakeShared<FJsonObject>();
+		ContextParam->SetStringField(TEXT("type"), TEXT("string"));
+		ContextParam->SetStringField(TEXT("description"), TEXT("Optional transaction context key (default: SpecialAgent.Blueprint)."));
+		Tool.Parameters->SetObjectField(TEXT("transaction_context"), ContextParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("end_transaction");
+		Tool.Description = TEXT("Commit/close the current managed Blueprint transaction.");
+
+		TSharedPtr<FJsonObject> TransactionIdParam = MakeShared<FJsonObject>();
+		TransactionIdParam->SetStringField(TEXT("type"), TEXT("string"));
+		TransactionIdParam->SetStringField(TEXT("description"), TEXT("Optional transaction_id returned by begin_transaction."));
+		Tool.Parameters->SetObjectField(TEXT("transaction_id"), TransactionIdParam);
+
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("cancel_transaction");
+		Tool.Description = TEXT("Cancel/rollback the current managed Blueprint transaction.");
+
+		TSharedPtr<FJsonObject> TransactionIdParam = MakeShared<FJsonObject>();
+		TransactionIdParam->SetStringField(TEXT("type"), TEXT("string"));
+		TransactionIdParam->SetStringField(TEXT("description"), TEXT("Optional transaction_id returned by begin_transaction."));
+		Tool.Parameters->SetObjectField(TEXT("transaction_id"), TransactionIdParam);
+
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("dry_run_validate");
+		Tool.Description = TEXT("Run non-mutating Blueprint preflight validation checks.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> IncludeIssuesParam = MakeShared<FJsonObject>();
+		IncludeIssuesParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		IncludeIssuesParam->SetStringField(TEXT("description"), TEXT("Include detailed validation issues in response (default: true)."));
+		Tool.Parameters->SetObjectField(TEXT("include_issues"), IncludeIssuesParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("capabilities");
+		Tool.Description = TEXT("Report Blueprint service capabilities, safety limits, and runtime transaction state.");
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
 		Tool.Name = TEXT("set_pin_default_value");
 		Tool.Description = TEXT("Set a node pin default value string.");
 
@@ -5034,6 +5115,11 @@ FMCPResponse FBlueprintService::HandleRequest(const FMCPRequest& Request, const 
 	if (MethodName == TEXT("list_overridable_functions")) return HandleListOverridableFunctions(Request);
 	if (MethodName == TEXT("override_function")) return HandleOverrideFunction(Request);
 	if (MethodName == TEXT("implement_interface_function")) return HandleImplementInterfaceFunction(Request);
+	if (MethodName == TEXT("begin_transaction")) return HandleBeginTransaction(Request);
+	if (MethodName == TEXT("end_transaction")) return HandleEndTransaction(Request);
+	if (MethodName == TEXT("cancel_transaction")) return HandleCancelTransaction(Request);
+	if (MethodName == TEXT("dry_run_validate")) return HandleDryRunValidate(Request);
+	if (MethodName == TEXT("capabilities")) return HandleCapabilities(Request);
 	if (MethodName == TEXT("set_pin_default_value")) return HandleSetPinDefaultValue(Request);
 	if (MethodName == TEXT("connect_pins")) return HandleConnectPins(Request);
 	if (MethodName == TEXT("compile_blueprint")) return HandleCompileBlueprint(Request);
@@ -14641,6 +14727,398 @@ FMCPResponse FBlueprintService::HandleImplementInterfaceFunction(const FMCPReque
 		Result->SetNumberField(TEXT("num_errors"), CompilerLog.NumErrors);
 		Result->SetNumberField(TEXT("num_warnings"), CompilerLog.NumWarnings);
 		Result->SetArrayField(TEXT("messages"), BuildCompilerMessagesJson(CompilerLog));
+		return Result;
+	};
+
+TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleBeginTransaction(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString Description = TEXT("SpecialAgent Blueprint Transaction");
+	FString TransactionContext = TEXT("SpecialAgent.Blueprint");
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	Request.Params->TryGetStringField(TEXT("description"), Description);
+	Request.Params->TryGetStringField(TEXT("transaction_context"), TransactionContext);
+
+	auto Task = [this, BlueprintPath, Description, TransactionContext]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		if (!GEditor)
+		{
+			return Fail(TEXT("Editor is unavailable"));
+		}
+
+		if (ActiveTransaction.IsSet() && !GEditor->IsTransactionActive())
+		{
+			ActiveTransaction.Reset();
+		}
+
+		if (ActiveTransaction.IsSet())
+		{
+			return Fail(FString::Printf(
+				TEXT("A managed blueprint transaction is already active (%s). End or cancel it first."),
+				*ActiveTransaction->TransactionId
+			));
+		}
+		if (GEditor->IsTransactionActive())
+		{
+			return Fail(FString::Printf(
+				TEXT("Another editor transaction is already active ('%s'). Begin transaction aborted for safety."),
+				*GEditor->GetTransactionName().ToString()
+			));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		const int32 TransactionIndex = GEditor->BeginTransaction(*TransactionContext, FText::FromString(Description), Blueprint);
+		if (TransactionIndex == INDEX_NONE)
+		{
+			return Fail(TEXT("Failed to begin transaction"));
+		}
+
+		Blueprint->Modify();
+
+		++TransactionSequence;
+		FBlueprintTransactionState TransactionState;
+		TransactionState.TransactionId = FString::Printf(
+			TEXT("bp_tx_%d_%s"),
+			TransactionSequence,
+			*FGuid::NewGuid().ToString(EGuidFormats::Digits)
+		);
+		TransactionState.BlueprintPath = NormalizeBlueprintPath(BlueprintPath);
+		TransactionState.TransactionIndex = TransactionIndex;
+		TransactionState.Description = Description;
+		TransactionState.StartedAtUtc = FDateTime::UtcNow();
+
+		ActiveTransaction = TransactionState;
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("transaction_id"), TransactionState.TransactionId);
+		Result->SetNumberField(TEXT("transaction_index"), TransactionState.TransactionIndex);
+		Result->SetStringField(TEXT("blueprint_path"), TransactionState.BlueprintPath);
+		Result->SetStringField(TEXT("description"), TransactionState.Description);
+		Result->SetStringField(TEXT("transaction_context"), TransactionContext);
+		Result->SetStringField(TEXT("started_at_utc"), TransactionState.StartedAtUtc.ToIso8601());
+		Result->SetBoolField(TEXT("is_transaction_active"), GEditor->IsTransactionActive());
+		Result->SetStringField(TEXT("active_transaction_name"), GEditor->GetTransactionName().ToString());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleEndTransaction(const FMCPRequest& Request)
+{
+	FString RequestedTransactionId;
+	if (Request.Params.IsValid())
+	{
+		Request.Params->TryGetStringField(TEXT("transaction_id"), RequestedTransactionId);
+	}
+
+	auto Task = [this, RequestedTransactionId]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		if (!GEditor)
+		{
+			return Fail(TEXT("Editor is unavailable"));
+		}
+
+		if (!ActiveTransaction.IsSet())
+		{
+			if (GEditor->IsTransactionActive())
+			{
+				return Fail(FString::Printf(
+					TEXT("An external transaction is active ('%s'). Refusing to end unknown transaction."),
+					*GEditor->GetTransactionName().ToString()
+				));
+			}
+			return Fail(TEXT("No managed blueprint transaction is active"));
+		}
+
+		if (!RequestedTransactionId.IsEmpty() && !RequestedTransactionId.Equals(ActiveTransaction->TransactionId, ESearchCase::CaseSensitive))
+		{
+			return Fail(FString::Printf(
+				TEXT("transaction_id mismatch. Expected '%s'"),
+				*ActiveTransaction->TransactionId
+			));
+		}
+
+		const FBlueprintTransactionState CompletedTransaction = ActiveTransaction.GetValue();
+		if (!GEditor->IsTransactionActive())
+		{
+			ActiveTransaction.Reset();
+			return Fail(TEXT("Managed transaction became inactive before end_transaction was called"));
+		}
+
+		const int32 EndedTransactionIndex = GEditor->EndTransaction();
+		ActiveTransaction.Reset();
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("transaction_id"), CompletedTransaction.TransactionId);
+		Result->SetNumberField(TEXT("transaction_index"), CompletedTransaction.TransactionIndex);
+		Result->SetNumberField(TEXT("ended_transaction_index"), EndedTransactionIndex);
+		Result->SetStringField(TEXT("blueprint_path"), CompletedTransaction.BlueprintPath);
+		Result->SetStringField(TEXT("description"), CompletedTransaction.Description);
+		Result->SetStringField(TEXT("started_at_utc"), CompletedTransaction.StartedAtUtc.ToIso8601());
+		Result->SetBoolField(TEXT("is_transaction_active"), GEditor->IsTransactionActive());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleCancelTransaction(const FMCPRequest& Request)
+{
+	FString RequestedTransactionId;
+	if (Request.Params.IsValid())
+	{
+		Request.Params->TryGetStringField(TEXT("transaction_id"), RequestedTransactionId);
+	}
+
+	auto Task = [this, RequestedTransactionId]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		if (!GEditor)
+		{
+			return Fail(TEXT("Editor is unavailable"));
+		}
+
+		if (!ActiveTransaction.IsSet())
+		{
+			if (GEditor->IsTransactionActive())
+			{
+				return Fail(FString::Printf(
+					TEXT("An external transaction is active ('%s'). Refusing to cancel unknown transaction."),
+					*GEditor->GetTransactionName().ToString()
+				));
+			}
+			return Fail(TEXT("No managed blueprint transaction is active"));
+		}
+
+		if (!RequestedTransactionId.IsEmpty() && !RequestedTransactionId.Equals(ActiveTransaction->TransactionId, ESearchCase::CaseSensitive))
+		{
+			return Fail(FString::Printf(
+				TEXT("transaction_id mismatch. Expected '%s'"),
+				*ActiveTransaction->TransactionId
+			));
+		}
+
+		const FBlueprintTransactionState CancelledTransaction = ActiveTransaction.GetValue();
+		if (!GEditor->IsTransactionActive())
+		{
+			ActiveTransaction.Reset();
+			return Fail(TEXT("Managed transaction became inactive before cancel_transaction was called"));
+		}
+
+		const int32 EndedTransactionIndex = GEditor->EndTransaction();
+		const bool bCanUndo = GEditor->Trans && GEditor->Trans->CanUndo();
+		const bool bRolledBack = bCanUndo ? GEditor->Trans->Undo() : false;
+		ActiveTransaction.Reset();
+
+		if (!bRolledBack)
+		{
+			return Fail(TEXT("Transaction was ended but rollback failed. Manual undo may be required."));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("transaction_id"), CancelledTransaction.TransactionId);
+		Result->SetNumberField(TEXT("transaction_index"), CancelledTransaction.TransactionIndex);
+		Result->SetNumberField(TEXT("ended_transaction_index"), EndedTransactionIndex);
+		Result->SetStringField(TEXT("blueprint_path"), CancelledTransaction.BlueprintPath);
+		Result->SetStringField(TEXT("description"), CancelledTransaction.Description);
+		Result->SetStringField(TEXT("started_at_utc"), CancelledTransaction.StartedAtUtc.ToIso8601());
+		Result->SetBoolField(TEXT("cancelled"), true);
+		Result->SetBoolField(TEXT("rolled_back"), true);
+		Result->SetBoolField(TEXT("is_transaction_active"), GEditor->IsTransactionActive());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleDryRunValidate(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	bool bIncludeIssues = true;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("include_issues"), bIncludeIssues);
+
+	auto Task = [BlueprintPath, bIncludeIssues]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		const EBlueprintStatus StatusBefore = Blueprint->Status;
+		const bool bPackageDirtyBefore = Blueprint->GetOutermost() ? Blueprint->GetOutermost()->IsDirty() : false;
+
+		FDataValidationContext ValidationContext;
+		const EDataValidationResult ValidationResult = Blueprint->IsDataValid(ValidationContext);
+		const bool bGeneratedClassValid = Blueprint->GeneratedClass ? UBlueprint::ValidateGeneratedClass(Blueprint->GeneratedClass) : false;
+
+		const EBlueprintStatus StatusAfter = Blueprint->Status;
+		const bool bPackageDirtyAfter = Blueprint->GetOutermost() ? Blueprint->GetOutermost()->IsDirty() : false;
+		const bool bMutated = (StatusBefore != StatusAfter) || (bPackageDirtyBefore != bPackageDirtyAfter);
+
+		TArray<TSharedPtr<FJsonValue>> ValidationIssuesJson;
+		if (bIncludeIssues)
+		{
+			ValidationIssuesJson.Reserve(ValidationContext.GetIssues().Num());
+			for (const FDataValidationContext::FIssue& Issue : ValidationContext.GetIssues())
+			{
+				ValidationIssuesJson.Add(MakeShared<FJsonValueObject>(BuildValidationIssueJson(Issue)));
+			}
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetBoolField(TEXT("include_issues"), bIncludeIssues);
+		Result->SetNumberField(TEXT("status_before"), static_cast<int32>(StatusBefore));
+		Result->SetStringField(TEXT("status_before_name"), BlueprintStatusToString(StatusBefore));
+		Result->SetNumberField(TEXT("status_after"), static_cast<int32>(StatusAfter));
+		Result->SetStringField(TEXT("status_after_name"), BlueprintStatusToString(StatusAfter));
+		Result->SetBoolField(TEXT("package_dirty_before"), bPackageDirtyBefore);
+		Result->SetBoolField(TEXT("package_dirty_after"), bPackageDirtyAfter);
+		Result->SetBoolField(TEXT("mutated"), bMutated);
+		Result->SetNumberField(TEXT("validation_result"), static_cast<int32>(ValidationResult));
+		Result->SetStringField(TEXT("validation_result_name"), DataValidationResultToString(ValidationResult));
+		Result->SetBoolField(TEXT("generated_class_valid"), bGeneratedClassValid);
+		Result->SetNumberField(TEXT("validation_issue_count"), ValidationContext.GetIssues().Num());
+		Result->SetNumberField(TEXT("validation_num_errors"), ValidationContext.GetNumErrors());
+		Result->SetNumberField(TEXT("validation_num_warnings"), ValidationContext.GetNumWarnings());
+		Result->SetBoolField(
+			TEXT("preflight_passed"),
+			ValidationContext.GetNumErrors() == 0
+			&& ValidationResult != EDataValidationResult::Invalid
+			&& bGeneratedClassValid
+		);
+
+		if (bIncludeIssues)
+		{
+			Result->SetArrayField(TEXT("validation_issues"), ValidationIssuesJson);
+		}
+
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleCapabilities(const FMCPRequest& Request)
+{
+	const FString RequestId = Request.Id;
+
+	auto Task = [this, RequestId]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+
+		if (ActiveTransaction.IsSet() && (!GEditor || !GEditor->IsTransactionActive()))
+		{
+			ActiveTransaction.Reset();
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("service"), TEXT("blueprint"));
+		Result->SetStringField(TEXT("engine_version"), FEngineVersion::Current().ToString());
+		Result->SetStringField(TEXT("mcp_request_id"), RequestId);
+
+		TSharedPtr<FJsonObject> FeaturesObj = MakeShared<FJsonObject>();
+		FeaturesObj->SetBoolField(TEXT("begin_transaction"), true);
+		FeaturesObj->SetBoolField(TEXT("end_transaction"), true);
+		FeaturesObj->SetBoolField(TEXT("cancel_transaction"), true);
+		FeaturesObj->SetBoolField(TEXT("dry_run_validate"), true);
+		FeaturesObj->SetBoolField(TEXT("capabilities"), true);
+		Result->SetObjectField(TEXT("phase11_tools"), FeaturesObj);
+
+		TSharedPtr<FJsonObject> SafetyObj = MakeShared<FJsonObject>();
+		SafetyObj->SetBoolField(TEXT("single_managed_transaction"), true);
+		SafetyObj->SetBoolField(TEXT("refuse_external_transaction_interference"), true);
+		SafetyObj->SetBoolField(TEXT("dry_run_does_not_compile"), true);
+		SafetyObj->SetStringField(TEXT("transaction_scope"), TEXT("BlueprintService-managed editor transactions"));
+		Result->SetObjectField(TEXT("safety_model"), SafetyObj);
+
+		TSharedPtr<FJsonObject> RuntimeObj = MakeShared<FJsonObject>();
+		RuntimeObj->SetBoolField(TEXT("editor_available"), GEditor != nullptr);
+		RuntimeObj->SetBoolField(TEXT("editor_transaction_active"), GEditor ? GEditor->IsTransactionActive() : false);
+		RuntimeObj->SetStringField(TEXT("editor_transaction_name"), GEditor ? GEditor->GetTransactionName().ToString() : TEXT(""));
+		RuntimeObj->SetBoolField(TEXT("managed_transaction_active"), ActiveTransaction.IsSet());
+		if (ActiveTransaction.IsSet())
+		{
+			TSharedPtr<FJsonObject> ActiveObj = MakeShared<FJsonObject>();
+			ActiveObj->SetStringField(TEXT("transaction_id"), ActiveTransaction->TransactionId);
+			ActiveObj->SetStringField(TEXT("blueprint_path"), ActiveTransaction->BlueprintPath);
+			ActiveObj->SetNumberField(TEXT("transaction_index"), ActiveTransaction->TransactionIndex);
+			ActiveObj->SetStringField(TEXT("description"), ActiveTransaction->Description);
+			ActiveObj->SetStringField(TEXT("started_at_utc"), ActiveTransaction->StartedAtUtc.ToIso8601());
+			RuntimeObj->SetObjectField(TEXT("active_transaction"), ActiveObj);
+		}
+		Result->SetObjectField(TEXT("runtime_state"), RuntimeObj);
+
+		TArray<TSharedPtr<FJsonValue>> NotesJson;
+		NotesJson.Add(MakeShared<FJsonValueString>(TEXT("Only one managed transaction can be active at a time.")));
+		NotesJson.Add(MakeShared<FJsonValueString>(TEXT("Managed transaction tools will refuse to end/cancel unknown external transactions.")));
+		NotesJson.Add(MakeShared<FJsonValueString>(TEXT("cancel_transaction performs rollback by ending the transaction and issuing a single Undo.")));
+		NotesJson.Add(MakeShared<FJsonValueString>(TEXT("dry_run_validate performs non-mutating validation checks and does not compile.")));
+		Result->SetArrayField(TEXT("notes"), NotesJson);
+
 		return Result;
 	};
 
