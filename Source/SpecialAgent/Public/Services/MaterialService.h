@@ -32,5 +32,13 @@ private:
 	FMCPResponse HandleSaveAsset(const FMCPRequest& Request);
 	FMCPResponse HandleGetMaterialInfo(const FMCPRequest& Request);
 	FMCPResponse HandleSetMaterialSettings(const FMCPRequest& Request);
+	FMCPResponse HandleListNodes(const FMCPRequest& Request);
+	FMCPResponse HandleAddExpressionByClass(const FMCPRequest& Request);
+	FMCPResponse HandleDeleteNode(const FMCPRequest& Request);
+	FMCPResponse HandleDuplicateNode(const FMCPRequest& Request);
+	FMCPResponse HandleMoveNode(const FMCPRequest& Request);
+	FMCPResponse HandleAddCommentNode(const FMCPRequest& Request);
+	FMCPResponse HandleAddRerouteNode(const FMCPRequest& Request);
+	FMCPResponse HandleLayoutGraph(const FMCPRequest& Request);
 	FMCPResponse HandleCapabilities(const FMCPRequest& Request);
 };
