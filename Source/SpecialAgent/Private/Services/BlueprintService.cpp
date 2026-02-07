@@ -4689,6 +4689,165 @@ TArray<FMCPToolInfo> FBlueprintService::GetAvailableTools() const
 
 	{
 		FMCPToolInfo Tool;
+		Tool.Name = TEXT("list_interfaces");
+		Tool.Description = TEXT("List interfaces implemented by a Blueprint (direct and optional inherited).");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> IncludeInheritedParam = MakeShared<FJsonObject>();
+		IncludeInheritedParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		IncludeInheritedParam->SetStringField(TEXT("description"), TEXT("If true (default), include interfaces inherited from parent classes."));
+		Tool.Parameters->SetObjectField(TEXT("include_inherited"), IncludeInheritedParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("add_interface");
+		Tool.Description = TEXT("Add an interface implementation to a Blueprint.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> InterfaceParam = MakeShared<FJsonObject>();
+		InterfaceParam->SetStringField(TEXT("type"), TEXT("string"));
+		InterfaceParam->SetStringField(TEXT("description"), TEXT("Interface class path/name (e.g. /Game/BPI_MyInterface.BPI_MyInterface_C or /Script/Module.MyInterface)."));
+		Tool.Parameters->SetObjectField(TEXT("interface_class"), InterfaceParam);
+
+		TSharedPtr<FJsonObject> CompileParam = MakeShared<FJsonObject>();
+		CompileParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		CompileParam->SetStringField(TEXT("description"), TEXT("If true, compile Blueprint after adding the interface."));
+		Tool.Parameters->SetObjectField(TEXT("compile"), CompileParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("interface_class"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("remove_interface");
+		Tool.Description = TEXT("Remove an interface implementation from a Blueprint.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> InterfaceParam = MakeShared<FJsonObject>();
+		InterfaceParam->SetStringField(TEXT("type"), TEXT("string"));
+		InterfaceParam->SetStringField(TEXT("description"), TEXT("Interface class path/name to remove."));
+		Tool.Parameters->SetObjectField(TEXT("interface_class"), InterfaceParam);
+
+		TSharedPtr<FJsonObject> PreserveParam = MakeShared<FJsonObject>();
+		PreserveParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		PreserveParam->SetStringField(TEXT("description"), TEXT("If true, preserve existing interface graphs as regular functions."));
+		Tool.Parameters->SetObjectField(TEXT("preserve_functions"), PreserveParam);
+
+		TSharedPtr<FJsonObject> CompileParam = MakeShared<FJsonObject>();
+		CompileParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		CompileParam->SetStringField(TEXT("description"), TEXT("If true, compile Blueprint after removing the interface."));
+		Tool.Parameters->SetObjectField(TEXT("compile"), CompileParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("interface_class"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("list_overridable_functions");
+		Tool.Description = TEXT("List functions that can be overridden in the Blueprint from parent classes/interfaces.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> IncludeImplementedParam = MakeShared<FJsonObject>();
+		IncludeImplementedParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		IncludeImplementedParam->SetStringField(TEXT("description"), TEXT("If true, include functions already implemented in the Blueprint."));
+		Tool.Parameters->SetObjectField(TEXT("include_implemented"), IncludeImplementedParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("override_function");
+		Tool.Description = TEXT("Implement or override a parent/interface function as an event node or function graph.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> FunctionParam = MakeShared<FJsonObject>();
+		FunctionParam->SetStringField(TEXT("type"), TEXT("string"));
+		FunctionParam->SetStringField(TEXT("description"), TEXT("Function name to override/implement."));
+		Tool.Parameters->SetObjectField(TEXT("function_name"), FunctionParam);
+
+		TSharedPtr<FJsonObject> AsEventParam = MakeShared<FJsonObject>();
+		AsEventParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		AsEventParam->SetStringField(TEXT("description"), TEXT("If true, force event implementation. If false, force function graph implementation."));
+		Tool.Parameters->SetObjectField(TEXT("as_event"), AsEventParam);
+
+		TSharedPtr<FJsonObject> CompileParam = MakeShared<FJsonObject>();
+		CompileParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		CompileParam->SetStringField(TEXT("description"), TEXT("If true, compile Blueprint after override."));
+		Tool.Parameters->SetObjectField(TEXT("compile"), CompileParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("function_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("implement_interface_function");
+		Tool.Description = TEXT("Implement a specific function from an interface already available to the Blueprint.");
+
+		TSharedPtr<FJsonObject> PathParam = MakeShared<FJsonObject>();
+		PathParam->SetStringField(TEXT("type"), TEXT("string"));
+		PathParam->SetStringField(TEXT("description"), TEXT("Blueprint asset path."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_path"), PathParam);
+
+		TSharedPtr<FJsonObject> InterfaceParam = MakeShared<FJsonObject>();
+		InterfaceParam->SetStringField(TEXT("type"), TEXT("string"));
+		InterfaceParam->SetStringField(TEXT("description"), TEXT("Interface class path/name."));
+		Tool.Parameters->SetObjectField(TEXT("interface_class"), InterfaceParam);
+
+		TSharedPtr<FJsonObject> FunctionParam = MakeShared<FJsonObject>();
+		FunctionParam->SetStringField(TEXT("type"), TEXT("string"));
+		FunctionParam->SetStringField(TEXT("description"), TEXT("Interface function name to implement."));
+		Tool.Parameters->SetObjectField(TEXT("function_name"), FunctionParam);
+
+		TSharedPtr<FJsonObject> AsEventParam = MakeShared<FJsonObject>();
+		AsEventParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		AsEventParam->SetStringField(TEXT("description"), TEXT("If true, force event implementation. If false, force function graph implementation."));
+		Tool.Parameters->SetObjectField(TEXT("as_event"), AsEventParam);
+
+		TSharedPtr<FJsonObject> CompileParam = MakeShared<FJsonObject>();
+		CompileParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		CompileParam->SetStringField(TEXT("description"), TEXT("If true, compile Blueprint after implementation."));
+		Tool.Parameters->SetObjectField(TEXT("compile"), CompileParam);
+
+		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tool.RequiredParams.Add(TEXT("interface_class"));
+		Tool.RequiredParams.Add(TEXT("function_name"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
 		Tool.Name = TEXT("set_pin_default_value");
 		Tool.Description = TEXT("Set a node pin default value string.");
 
@@ -4869,6 +5028,12 @@ FMCPResponse FBlueprintService::HandleRequest(const FMCPRequest& Request, const 
 	if (MethodName == TEXT("refresh_all_nodes")) return HandleRefreshAllNodes(Request);
 	if (MethodName == TEXT("get_blueprint_status")) return HandleGetBlueprintStatus(Request);
 	if (MethodName == TEXT("list_blueprint_warnings")) return HandleListBlueprintWarnings(Request);
+	if (MethodName == TEXT("list_interfaces")) return HandleListInterfaces(Request);
+	if (MethodName == TEXT("add_interface")) return HandleAddInterface(Request);
+	if (MethodName == TEXT("remove_interface")) return HandleRemoveInterface(Request);
+	if (MethodName == TEXT("list_overridable_functions")) return HandleListOverridableFunctions(Request);
+	if (MethodName == TEXT("override_function")) return HandleOverrideFunction(Request);
+	if (MethodName == TEXT("implement_interface_function")) return HandleImplementInterfaceFunction(Request);
 	if (MethodName == TEXT("set_pin_default_value")) return HandleSetPinDefaultValue(Request);
 	if (MethodName == TEXT("connect_pins")) return HandleConnectPins(Request);
 	if (MethodName == TEXT("compile_blueprint")) return HandleCompileBlueprint(Request);
@@ -13568,6 +13733,914 @@ FMCPResponse FBlueprintService::HandleListBlueprintWarnings(const FMCPRequest& R
 		Result->SetNumberField(TEXT("warning_count"), TotalWarningCount);
 		Result->SetNumberField(TEXT("returned_warning_count"), WarningsJson.Num());
 		Result->SetArrayField(TEXT("warnings"), WarningsJson);
+		return Result;
+	};
+
+TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleListInterfaces(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	bool bIncludeInherited = true;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("include_inherited"), bIncludeInherited);
+
+	auto Task = [BlueprintPath, bIncludeInherited]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		TArray<TSharedPtr<FJsonValue>> DirectInterfacesJson;
+		TSet<FTopLevelAssetPath> DirectInterfacePaths;
+
+		for (const FBPInterfaceDescription& InterfaceDesc : Blueprint->ImplementedInterfaces)
+		{
+			UClass* InterfaceClass = InterfaceDesc.Interface.Get();
+			if (!InterfaceClass)
+			{
+				continue;
+			}
+
+			DirectInterfacePaths.Add(InterfaceClass->GetClassPathName());
+
+			TSharedPtr<FJsonObject> InterfaceObj = MakeShared<FJsonObject>();
+			InterfaceObj->SetStringField(TEXT("interface_name"), InterfaceClass->GetName());
+			InterfaceObj->SetStringField(TEXT("interface_class"), InterfaceClass->GetPathName());
+			InterfaceObj->SetStringField(TEXT("interface_class_path"), InterfaceClass->GetClassPathName().ToString());
+			InterfaceObj->SetBoolField(TEXT("inherited"), false);
+
+			TArray<TSharedPtr<FJsonValue>> GraphsJson;
+			for (UEdGraph* Graph : InterfaceDesc.Graphs)
+			{
+				if (!Graph)
+				{
+					continue;
+				}
+
+				TSharedPtr<FJsonObject> GraphObj = MakeShared<FJsonObject>();
+				GraphObj->SetStringField(TEXT("graph_name"), Graph->GetName());
+				GraphObj->SetStringField(TEXT("graph_path"), Graph->GetPathName());
+				GraphsJson.Add(MakeShared<FJsonValueObject>(GraphObj));
+			}
+			InterfaceObj->SetArrayField(TEXT("graphs"), GraphsJson);
+			InterfaceObj->SetNumberField(TEXT("graph_count"), GraphsJson.Num());
+
+			DirectInterfacesJson.Add(MakeShared<FJsonValueObject>(InterfaceObj));
+		}
+
+		TArray<TSharedPtr<FJsonValue>> InheritedInterfacesJson;
+		if (bIncludeInherited)
+		{
+			TArray<UClass*> AllImplementedInterfaces;
+			FBlueprintEditorUtils::FindImplementedInterfaces(Blueprint, true, AllImplementedInterfaces);
+			for (UClass* InterfaceClass : AllImplementedInterfaces)
+			{
+				if (!InterfaceClass)
+				{
+					continue;
+				}
+				if (DirectInterfacePaths.Contains(InterfaceClass->GetClassPathName()))
+				{
+					continue;
+				}
+
+				TSharedPtr<FJsonObject> InterfaceObj = MakeShared<FJsonObject>();
+				InterfaceObj->SetStringField(TEXT("interface_name"), InterfaceClass->GetName());
+				InterfaceObj->SetStringField(TEXT("interface_class"), InterfaceClass->GetPathName());
+				InterfaceObj->SetStringField(TEXT("interface_class_path"), InterfaceClass->GetClassPathName().ToString());
+				InterfaceObj->SetBoolField(TEXT("inherited"), true);
+				InterfaceObj->SetArrayField(TEXT("graphs"), TArray<TSharedPtr<FJsonValue>>());
+				InterfaceObj->SetNumberField(TEXT("graph_count"), 0);
+				InheritedInterfacesJson.Add(MakeShared<FJsonValueObject>(InterfaceObj));
+			}
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetBoolField(TEXT("include_inherited"), bIncludeInherited);
+		Result->SetArrayField(TEXT("direct_interfaces"), DirectInterfacesJson);
+		Result->SetArrayField(TEXT("inherited_interfaces"), InheritedInterfacesJson);
+		Result->SetNumberField(TEXT("direct_interface_count"), DirectInterfacesJson.Num());
+		Result->SetNumberField(TEXT("inherited_interface_count"), InheritedInterfacesJson.Num());
+		Result->SetNumberField(TEXT("interface_count"), DirectInterfacesJson.Num() + InheritedInterfacesJson.Num());
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleAddInterface(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString InterfaceClassNameOrPath;
+	bool bCompile = false;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("interface_class"), InterfaceClassNameOrPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'interface_class'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+	auto Task = [BlueprintPath, InterfaceClassNameOrPath, bCompile]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UClass* InterfaceClass = ResolveClass(InterfaceClassNameOrPath);
+		if (!InterfaceClass)
+		{
+			if (UBlueprint* InterfaceBlueprint = LoadBlueprint(InterfaceClassNameOrPath))
+			{
+				InterfaceClass = InterfaceBlueprint->GeneratedClass;
+			}
+		}
+		if (!InterfaceClass)
+		{
+			return Fail(FString::Printf(TEXT("Interface class not found: %s"), *InterfaceClassNameOrPath));
+		}
+		if (!InterfaceClass->IsChildOf(UInterface::StaticClass()))
+		{
+			return Fail(FString::Printf(TEXT("Class is not an interface: %s"), *InterfaceClass->GetPathName()));
+		}
+
+		bool bAlreadyImplemented = false;
+		for (const FBPInterfaceDescription& InterfaceDesc : Blueprint->ImplementedInterfaces)
+		{
+			UClass* ExistingInterfaceClass = InterfaceDesc.Interface.Get();
+			if (ExistingInterfaceClass && ExistingInterfaceClass->GetClassPathName() == InterfaceClass->GetClassPathName())
+			{
+				bAlreadyImplemented = true;
+				break;
+			}
+		}
+
+		if (!bAlreadyImplemented)
+		{
+			const bool bImplemented = FBlueprintEditorUtils::ImplementNewInterface(Blueprint, InterfaceClass->GetClassPathName());
+			if (!bImplemented)
+			{
+				return Fail(FString::Printf(TEXT("Failed to implement interface: %s"), *InterfaceClass->GetPathName()));
+			}
+		}
+
+		const FBPInterfaceDescription* AddedInterfaceDesc = nullptr;
+		for (const FBPInterfaceDescription& InterfaceDesc : Blueprint->ImplementedInterfaces)
+		{
+			UClass* ExistingInterfaceClass = InterfaceDesc.Interface.Get();
+			if (ExistingInterfaceClass && ExistingInterfaceClass->GetClassPathName() == InterfaceClass->GetClassPathName())
+			{
+				AddedInterfaceDesc = &InterfaceDesc;
+				break;
+			}
+		}
+
+		FCompilerResultsLog CompilerLog;
+		if (bCompile)
+		{
+			FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> GraphsJson;
+		if (AddedInterfaceDesc)
+		{
+			for (UEdGraph* Graph : AddedInterfaceDesc->Graphs)
+			{
+				if (!Graph)
+				{
+					continue;
+				}
+				TSharedPtr<FJsonObject> GraphObj = MakeShared<FJsonObject>();
+				GraphObj->SetStringField(TEXT("graph_name"), Graph->GetName());
+				GraphObj->SetStringField(TEXT("graph_path"), Graph->GetPathName());
+				GraphsJson.Add(MakeShared<FJsonValueObject>(GraphObj));
+			}
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("interface_name"), InterfaceClass->GetName());
+		Result->SetStringField(TEXT("interface_class"), InterfaceClass->GetPathName());
+		Result->SetStringField(TEXT("interface_class_path"), InterfaceClass->GetClassPathName().ToString());
+		Result->SetBoolField(TEXT("changed"), !bAlreadyImplemented);
+		Result->SetBoolField(TEXT("already_implemented"), bAlreadyImplemented);
+		Result->SetBoolField(TEXT("compiled"), bCompile);
+		Result->SetArrayField(TEXT("graphs"), GraphsJson);
+		Result->SetNumberField(TEXT("graph_count"), GraphsJson.Num());
+		Result->SetNumberField(TEXT("num_errors"), CompilerLog.NumErrors);
+		Result->SetNumberField(TEXT("num_warnings"), CompilerLog.NumWarnings);
+		Result->SetArrayField(TEXT("messages"), BuildCompilerMessagesJson(CompilerLog));
+		return Result;
+	};
+
+TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleRemoveInterface(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString InterfaceClassNameOrPath;
+	bool bPreserveFunctions = false;
+	bool bCompile = false;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("interface_class"), InterfaceClassNameOrPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'interface_class'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("preserve_functions"), bPreserveFunctions);
+	Request.Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+	auto Task = [BlueprintPath, InterfaceClassNameOrPath, bPreserveFunctions, bCompile]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UClass* InterfaceClass = ResolveClass(InterfaceClassNameOrPath);
+		if (!InterfaceClass)
+		{
+			if (UBlueprint* InterfaceBlueprint = LoadBlueprint(InterfaceClassNameOrPath))
+			{
+				InterfaceClass = InterfaceBlueprint->GeneratedClass;
+			}
+		}
+		if (!InterfaceClass)
+		{
+			return Fail(FString::Printf(TEXT("Interface class not found: %s"), *InterfaceClassNameOrPath));
+		}
+		if (!InterfaceClass->IsChildOf(UInterface::StaticClass()))
+		{
+			return Fail(FString::Printf(TEXT("Class is not an interface: %s"), *InterfaceClass->GetPathName()));
+		}
+
+		bool bWasImplemented = false;
+		for (const FBPInterfaceDescription& InterfaceDesc : Blueprint->ImplementedInterfaces)
+		{
+			UClass* ExistingInterfaceClass = InterfaceDesc.Interface.Get();
+			if (ExistingInterfaceClass && ExistingInterfaceClass->GetClassPathName() == InterfaceClass->GetClassPathName())
+			{
+				bWasImplemented = true;
+				break;
+			}
+		}
+
+		if (bWasImplemented)
+		{
+			FBlueprintEditorUtils::RemoveInterface(Blueprint, InterfaceClass->GetClassPathName(), bPreserveFunctions);
+		}
+
+		bool bStillImplemented = false;
+		for (const FBPInterfaceDescription& InterfaceDesc : Blueprint->ImplementedInterfaces)
+		{
+			UClass* ExistingInterfaceClass = InterfaceDesc.Interface.Get();
+			if (ExistingInterfaceClass && ExistingInterfaceClass->GetClassPathName() == InterfaceClass->GetClassPathName())
+			{
+				bStillImplemented = true;
+				break;
+			}
+		}
+
+		if (bWasImplemented && bStillImplemented)
+		{
+			return Fail(FString::Printf(TEXT("Failed to remove interface: %s"), *InterfaceClass->GetPathName()));
+		}
+
+		FCompilerResultsLog CompilerLog;
+		if (bCompile)
+		{
+			FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("interface_name"), InterfaceClass->GetName());
+		Result->SetStringField(TEXT("interface_class"), InterfaceClass->GetPathName());
+		Result->SetStringField(TEXT("interface_class_path"), InterfaceClass->GetClassPathName().ToString());
+		Result->SetBoolField(TEXT("was_implemented"), bWasImplemented);
+		Result->SetBoolField(TEXT("changed"), bWasImplemented && !bStillImplemented);
+		Result->SetBoolField(TEXT("preserve_functions"), bPreserveFunctions);
+		Result->SetBoolField(TEXT("compiled"), bCompile);
+		Result->SetNumberField(TEXT("num_errors"), CompilerLog.NumErrors);
+		Result->SetNumberField(TEXT("num_warnings"), CompilerLog.NumWarnings);
+		Result->SetArrayField(TEXT("messages"), BuildCompilerMessagesJson(CompilerLog));
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleListOverridableFunctions(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	bool bIncludeImplemented = false;
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("include_implemented"), bIncludeImplemented);
+
+	auto Task = [BlueprintPath, bIncludeImplemented]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		TArray<TSharedPtr<FJsonValue>> FunctionsJson;
+		TSet<FName> SeenFunctions;
+
+		auto AddCandidateFunction = [&](const UFunction* Function, const UClass* SignatureClass, bool bFromInterface)
+		{
+			if (!Function || !SignatureClass)
+			{
+				return;
+			}
+
+			const FName FunctionName = Function->GetFName();
+			if (FunctionName.IsNone() || FunctionName == UEdGraphSchema_K2::FN_ExecuteUbergraphBase)
+			{
+				return;
+			}
+			if (SeenFunctions.Contains(FunctionName))
+			{
+				return;
+			}
+			if (!UEdGraphSchema_K2::CanKismetOverrideFunction(Function))
+			{
+				return;
+			}
+			if (!Blueprint->AllowFunctionOverride(Function))
+			{
+				return;
+			}
+
+			const bool bHasFunctionGraph = FindFunctionGraphByName(Blueprint, FunctionName.ToString()) != nullptr;
+			const bool bHasEventOverride = FBlueprintEditorUtils::FindOverrideForFunction(Blueprint, SignatureClass, FunctionName) != nullptr;
+			const bool bImplemented = bHasFunctionGraph || bHasEventOverride;
+			if (!bIncludeImplemented && bImplemented)
+			{
+				return;
+			}
+
+			TSharedPtr<FJsonObject> FunctionObj = MakeShared<FJsonObject>();
+			FunctionObj->SetStringField(TEXT("function_name"), FunctionName.ToString());
+			FunctionObj->SetStringField(TEXT("signature_class"), SignatureClass->GetPathName());
+			FunctionObj->SetStringField(TEXT("signature_class_path"), SignatureClass->GetClassPathName().ToString());
+			FunctionObj->SetBoolField(TEXT("is_interface_function"), bFromInterface);
+			FunctionObj->SetBoolField(TEXT("can_be_event"), UEdGraphSchema_K2::FunctionCanBePlacedAsEvent(Function));
+			FunctionObj->SetBoolField(TEXT("implemented_as_function_graph"), bHasFunctionGraph);
+			FunctionObj->SetBoolField(TEXT("implemented_as_event"), bHasEventOverride);
+			FunctionObj->SetBoolField(TEXT("already_implemented"), bImplemented);
+			FunctionObj->SetStringField(TEXT("tooltip"), Function->GetToolTipText().ToString());
+
+			FunctionsJson.Add(MakeShared<FJsonValueObject>(FunctionObj));
+			SeenFunctions.Add(FunctionName);
+		};
+
+		const UClass* ParentClass = Blueprint->SkeletonGeneratedClass ? Blueprint->SkeletonGeneratedClass->GetSuperClass() : nullptr;
+		if (!ParentClass)
+		{
+			ParentClass = Blueprint->ParentClass.Get();
+		}
+		if (ParentClass)
+		{
+			for (TFieldIterator<UFunction> FunctionIt(ParentClass, EFieldIteratorFlags::IncludeSuper); FunctionIt; ++FunctionIt)
+			{
+				const UFunction* Function = *FunctionIt;
+				const UClass* SignatureClass = Function ? Function->GetOuterUClass() : nullptr;
+				if (UBlueprintGeneratedClass* GeneratedOuterClass = Cast<UBlueprintGeneratedClass>(const_cast<UClass*>(SignatureClass)))
+				{
+					SignatureClass = GeneratedOuterClass->GetAuthoritativeClass();
+				}
+				if (!SignatureClass)
+				{
+					SignatureClass = ParentClass;
+				}
+
+				AddCandidateFunction(Function, SignatureClass, false);
+			}
+		}
+
+		for (const FBPInterfaceDescription& InterfaceDesc : Blueprint->ImplementedInterfaces)
+		{
+			UClass* InterfaceClass = InterfaceDesc.Interface.Get();
+			if (!InterfaceClass)
+			{
+				continue;
+			}
+			for (TFieldIterator<UFunction> FunctionIt(InterfaceClass, EFieldIteratorFlags::IncludeSuper); FunctionIt; ++FunctionIt)
+			{
+				AddCandidateFunction(*FunctionIt, InterfaceClass, true);
+			}
+		}
+
+		for (UClass* TempClass = Blueprint->ParentClass; TempClass; TempClass = TempClass->GetSuperClass())
+		{
+			for (const FImplementedInterface& ImplementedInterface : TempClass->Interfaces)
+			{
+				UClass* InterfaceClass = ImplementedInterface.Class;
+				if (!InterfaceClass)
+				{
+					continue;
+				}
+
+				for (TFieldIterator<UFunction> FunctionIt(InterfaceClass, EFieldIteratorFlags::IncludeSuper); FunctionIt; ++FunctionIt)
+				{
+					AddCandidateFunction(*FunctionIt, InterfaceClass, true);
+				}
+			}
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetBoolField(TEXT("include_implemented"), bIncludeImplemented);
+		Result->SetArrayField(TEXT("functions"), FunctionsJson);
+		Result->SetNumberField(TEXT("function_count"), FunctionsJson.Num());
+		return Result;
+	};
+
+TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleOverrideFunction(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString FunctionName;
+	bool bCompile = false;
+	bool bAsEvent = false;
+	const bool bHasAsEvent = Request.Params->HasTypedField<EJson::Boolean>(TEXT("as_event"));
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("function_name"), FunctionName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'function_name'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("compile"), bCompile);
+	if (bHasAsEvent)
+	{
+		Request.Params->TryGetBoolField(TEXT("as_event"), bAsEvent);
+	}
+
+	auto Task = [BlueprintPath, FunctionName, bCompile, bHasAsEvent, bAsEvent]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedFunctionName = FunctionName.TrimStartAndEnd();
+		if (TrimmedFunctionName.IsEmpty())
+		{
+			return Fail(TEXT("Parameter 'function_name' must not be empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		FBlueprintEditorUtils::ConformImplementedInterfaces(Blueprint);
+
+		const FName FunctionFName(*TrimmedFunctionName);
+		UFunction* OverrideFunc = nullptr;
+		UClass* OverrideFuncClass = FBlueprintEditorUtils::GetOverrideFunctionClass(Blueprint, FunctionFName, &OverrideFunc);
+		if (!OverrideFunc || !OverrideFuncClass)
+		{
+			return Fail(FString::Printf(TEXT("Function '%s' is not overridable for this Blueprint"), *TrimmedFunctionName));
+		}
+
+		UEdGraph* EventGraph = FBlueprintEditorUtils::FindEventGraph(Blueprint);
+		const bool bCanUseEvent = UEdGraphSchema_K2::FunctionCanBePlacedAsEvent(OverrideFunc) && EventGraph != nullptr;
+		const bool bImplementAsEvent = bHasAsEvent ? bAsEvent : bCanUseEvent;
+		if (bImplementAsEvent && !bCanUseEvent)
+		{
+			return Fail(FString::Printf(TEXT("Function '%s' cannot be implemented as an event on this Blueprint"), *TrimmedFunctionName));
+		}
+
+		FCompilerResultsLog CompilerLog;
+
+		if (bImplementAsEvent)
+		{
+			UK2Node_Event* ExistingEvent = FBlueprintEditorUtils::FindOverrideForFunction(Blueprint, OverrideFuncClass, FunctionFName);
+			if (ExistingEvent)
+			{
+				if (bCompile)
+				{
+					FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+				}
+
+				Result->SetBoolField(TEXT("success"), true);
+				Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+				Result->SetStringField(TEXT("function_name"), FunctionFName.ToString());
+				Result->SetStringField(TEXT("signature_class"), OverrideFuncClass->GetPathName());
+				Result->SetStringField(TEXT("implementation_type"), TEXT("event_node"));
+				Result->SetBoolField(TEXT("changed"), false);
+				Result->SetStringField(TEXT("node_id"), ExistingEvent->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+				Result->SetStringField(TEXT("graph_name"), EventGraph ? EventGraph->GetName() : TEXT(""));
+				Result->SetBoolField(TEXT("compiled"), bCompile);
+				Result->SetNumberField(TEXT("num_errors"), CompilerLog.NumErrors);
+				Result->SetNumberField(TEXT("num_warnings"), CompilerLog.NumWarnings);
+				Result->SetArrayField(TEXT("messages"), BuildCompilerMessagesJson(CompilerLog));
+				return Result;
+			}
+
+			UK2Node_Event* NewEventNode = FEdGraphSchemaAction_K2NewNode::SpawnNode<UK2Node_Event>(
+				EventGraph,
+				EventGraph->GetGoodPlaceForNewNode(),
+				EK2NewNodeFlags::SelectNewNode,
+				[FunctionFName, OverrideFuncClass](UK2Node_Event* NewInstance)
+				{
+					NewInstance->EventReference.SetExternalMember(FunctionFName, OverrideFuncClass);
+					NewInstance->bOverrideFunction = true;
+				}
+			);
+
+			if (!NewEventNode)
+			{
+				return Fail(FString::Printf(TEXT("Failed to create event override for '%s'"), *TrimmedFunctionName));
+			}
+
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+			if (bCompile)
+			{
+				FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+			}
+
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetStringField(TEXT("function_name"), FunctionFName.ToString());
+			Result->SetStringField(TEXT("signature_class"), OverrideFuncClass->GetPathName());
+			Result->SetStringField(TEXT("implementation_type"), TEXT("event_node"));
+			Result->SetBoolField(TEXT("changed"), true);
+			Result->SetStringField(TEXT("node_id"), NewEventNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+			Result->SetStringField(TEXT("graph_name"), EventGraph->GetName());
+			Result->SetBoolField(TEXT("compiled"), bCompile);
+			Result->SetNumberField(TEXT("num_errors"), CompilerLog.NumErrors);
+			Result->SetNumberField(TEXT("num_warnings"), CompilerLog.NumWarnings);
+			Result->SetArrayField(TEXT("messages"), BuildCompilerMessagesJson(CompilerLog));
+			return Result;
+		}
+
+		UEdGraph* ExistingFunctionGraph = FindFunctionGraphByName(Blueprint, TrimmedFunctionName);
+		if (ExistingFunctionGraph)
+		{
+			if (bCompile)
+			{
+				FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+			}
+
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetStringField(TEXT("function_name"), FunctionFName.ToString());
+			Result->SetStringField(TEXT("signature_class"), OverrideFuncClass->GetPathName());
+			Result->SetStringField(TEXT("implementation_type"), TEXT("function_graph"));
+			Result->SetBoolField(TEXT("changed"), false);
+			Result->SetStringField(TEXT("graph_name"), ExistingFunctionGraph->GetName());
+			Result->SetStringField(TEXT("graph_path"), ExistingFunctionGraph->GetPathName());
+			Result->SetBoolField(TEXT("compiled"), bCompile);
+			Result->SetNumberField(TEXT("num_errors"), CompilerLog.NumErrors);
+			Result->SetNumberField(TEXT("num_warnings"), CompilerLog.NumWarnings);
+			Result->SetArrayField(TEXT("messages"), BuildCompilerMessagesJson(CompilerLog));
+			return Result;
+		}
+
+		UEdGraph* NewFunctionGraph = FBlueprintEditorUtils::CreateNewGraph(
+			Blueprint,
+			FunctionFName,
+			UEdGraph::StaticClass(),
+			UEdGraphSchema_K2::StaticClass()
+		);
+		if (!NewFunctionGraph)
+		{
+			return Fail(FString::Printf(TEXT("Failed to create function graph for '%s'"), *TrimmedFunctionName));
+		}
+
+		FBlueprintEditorUtils::AddFunctionGraph(Blueprint, NewFunctionGraph, false, OverrideFuncClass);
+
+		if (bCompile)
+		{
+			FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("function_name"), FunctionFName.ToString());
+		Result->SetStringField(TEXT("signature_class"), OverrideFuncClass->GetPathName());
+		Result->SetStringField(TEXT("implementation_type"), TEXT("function_graph"));
+		Result->SetBoolField(TEXT("changed"), true);
+		Result->SetStringField(TEXT("graph_name"), NewFunctionGraph->GetName());
+		Result->SetStringField(TEXT("graph_path"), NewFunctionGraph->GetPathName());
+		Result->SetBoolField(TEXT("compiled"), bCompile);
+		Result->SetNumberField(TEXT("num_errors"), CompilerLog.NumErrors);
+		Result->SetNumberField(TEXT("num_warnings"), CompilerLog.NumWarnings);
+		Result->SetArrayField(TEXT("messages"), BuildCompilerMessagesJson(CompilerLog));
+		return Result;
+	};
+
+TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleImplementInterfaceFunction(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString BlueprintPath;
+	FString InterfaceClassNameOrPath;
+	FString FunctionName;
+	bool bCompile = false;
+	bool bAsEvent = false;
+	const bool bHasAsEvent = Request.Params->HasTypedField<EJson::Boolean>(TEXT("as_event"));
+	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("interface_class"), InterfaceClassNameOrPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'interface_class'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("function_name"), FunctionName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'function_name'"));
+	}
+	Request.Params->TryGetBoolField(TEXT("compile"), bCompile);
+	if (bHasAsEvent)
+	{
+		Request.Params->TryGetBoolField(TEXT("as_event"), bAsEvent);
+	}
+
+	auto Task = [BlueprintPath, InterfaceClassNameOrPath, FunctionName, bCompile, bHasAsEvent, bAsEvent]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		const FString TrimmedFunctionName = FunctionName.TrimStartAndEnd();
+		if (TrimmedFunctionName.IsEmpty())
+		{
+			return Fail(TEXT("Parameter 'function_name' must not be empty"));
+		}
+
+		UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
+		if (!Blueprint)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		}
+
+		UClass* InterfaceClass = ResolveClass(InterfaceClassNameOrPath);
+		if (!InterfaceClass)
+		{
+			if (UBlueprint* InterfaceBlueprint = LoadBlueprint(InterfaceClassNameOrPath))
+			{
+				InterfaceClass = InterfaceBlueprint->GeneratedClass;
+			}
+		}
+		if (!InterfaceClass)
+		{
+			return Fail(FString::Printf(TEXT("Interface class not found: %s"), *InterfaceClassNameOrPath));
+		}
+		if (!InterfaceClass->IsChildOf(UInterface::StaticClass()))
+		{
+			return Fail(FString::Printf(TEXT("Class is not an interface: %s"), *InterfaceClass->GetPathName()));
+		}
+
+		bool bBlueprintHasInterface = false;
+		TArray<UClass*> AllImplementedInterfaces;
+		FBlueprintEditorUtils::FindImplementedInterfaces(Blueprint, true, AllImplementedInterfaces);
+		for (UClass* ImplementedInterface : AllImplementedInterfaces)
+		{
+			if (ImplementedInterface && ImplementedInterface->GetClassPathName() == InterfaceClass->GetClassPathName())
+			{
+				bBlueprintHasInterface = true;
+				break;
+			}
+		}
+		if (!bBlueprintHasInterface)
+		{
+			return Fail(FString::Printf(TEXT("Blueprint does not implement interface: %s"), *InterfaceClass->GetPathName()));
+		}
+
+		const FName FunctionFName(*TrimmedFunctionName);
+		UFunction* InterfaceFunction = InterfaceClass->FindFunctionByName(FunctionFName);
+		if (!InterfaceFunction)
+		{
+			return Fail(FString::Printf(TEXT("Function '%s' was not found on interface '%s'"), *TrimmedFunctionName, *InterfaceClass->GetPathName()));
+		}
+		if (!UEdGraphSchema_K2::CanKismetOverrideFunction(InterfaceFunction))
+		{
+			return Fail(FString::Printf(TEXT("Interface function '%s' cannot be implemented via K2 override"), *TrimmedFunctionName));
+		}
+
+		FBlueprintEditorUtils::ConformImplementedInterfaces(Blueprint);
+
+		UEdGraph* ExistingFunctionGraph = FindFunctionGraphByName(Blueprint, TrimmedFunctionName);
+		UK2Node_Event* ExistingEvent = FBlueprintEditorUtils::FindOverrideForFunction(Blueprint, InterfaceClass, FunctionFName);
+
+		FCompilerResultsLog CompilerLog;
+		if (ExistingFunctionGraph || ExistingEvent)
+		{
+			if (bCompile)
+			{
+				FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+			}
+
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetStringField(TEXT("interface_name"), InterfaceClass->GetName());
+			Result->SetStringField(TEXT("interface_class"), InterfaceClass->GetPathName());
+			Result->SetStringField(TEXT("function_name"), FunctionFName.ToString());
+			Result->SetStringField(TEXT("implementation_type"), ExistingFunctionGraph ? TEXT("function_graph") : TEXT("event_node"));
+			Result->SetBoolField(TEXT("changed"), false);
+			if (ExistingFunctionGraph)
+			{
+				Result->SetStringField(TEXT("graph_name"), ExistingFunctionGraph->GetName());
+				Result->SetStringField(TEXT("graph_path"), ExistingFunctionGraph->GetPathName());
+			}
+			if (ExistingEvent)
+			{
+				Result->SetStringField(TEXT("node_id"), ExistingEvent->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+			}
+			Result->SetBoolField(TEXT("compiled"), bCompile);
+			Result->SetNumberField(TEXT("num_errors"), CompilerLog.NumErrors);
+			Result->SetNumberField(TEXT("num_warnings"), CompilerLog.NumWarnings);
+			Result->SetArrayField(TEXT("messages"), BuildCompilerMessagesJson(CompilerLog));
+			return Result;
+		}
+
+		UEdGraph* EventGraph = FBlueprintEditorUtils::FindEventGraph(Blueprint);
+		const bool bCanUseEvent = UEdGraphSchema_K2::FunctionCanBePlacedAsEvent(InterfaceFunction) && EventGraph != nullptr;
+		const bool bImplementAsEvent = bHasAsEvent ? bAsEvent : false;
+		if (bImplementAsEvent && !bCanUseEvent)
+		{
+			return Fail(FString::Printf(TEXT("Interface function '%s' cannot be implemented as an event on this Blueprint"), *TrimmedFunctionName));
+		}
+
+		if (bImplementAsEvent)
+		{
+			UK2Node_Event* NewEventNode = FEdGraphSchemaAction_K2NewNode::SpawnNode<UK2Node_Event>(
+				EventGraph,
+				EventGraph->GetGoodPlaceForNewNode(),
+				EK2NewNodeFlags::SelectNewNode,
+				[FunctionFName, InterfaceClass](UK2Node_Event* NewInstance)
+				{
+					NewInstance->EventReference.SetExternalMember(FunctionFName, InterfaceClass);
+					NewInstance->bOverrideFunction = true;
+				}
+			);
+
+			if (!NewEventNode)
+			{
+				return Fail(FString::Printf(TEXT("Failed to create interface event implementation for '%s'"), *TrimmedFunctionName));
+			}
+
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+			if (bCompile)
+			{
+				FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+			}
+
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+			Result->SetStringField(TEXT("interface_name"), InterfaceClass->GetName());
+			Result->SetStringField(TEXT("interface_class"), InterfaceClass->GetPathName());
+			Result->SetStringField(TEXT("function_name"), FunctionFName.ToString());
+			Result->SetStringField(TEXT("implementation_type"), TEXT("event_node"));
+			Result->SetBoolField(TEXT("changed"), true);
+			Result->SetStringField(TEXT("node_id"), NewEventNode->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
+			Result->SetStringField(TEXT("graph_name"), EventGraph->GetName());
+			Result->SetBoolField(TEXT("compiled"), bCompile);
+			Result->SetNumberField(TEXT("num_errors"), CompilerLog.NumErrors);
+			Result->SetNumberField(TEXT("num_warnings"), CompilerLog.NumWarnings);
+			Result->SetArrayField(TEXT("messages"), BuildCompilerMessagesJson(CompilerLog));
+			return Result;
+		}
+
+		UEdGraph* NewFunctionGraph = FBlueprintEditorUtils::CreateNewGraph(
+			Blueprint,
+			FunctionFName,
+			UEdGraph::StaticClass(),
+			UEdGraphSchema_K2::StaticClass()
+		);
+		if (!NewFunctionGraph)
+		{
+			return Fail(FString::Printf(TEXT("Failed to create function graph for interface function '%s'"), *TrimmedFunctionName));
+		}
+
+		FBlueprintEditorUtils::AddFunctionGraph(Blueprint, NewFunctionGraph, false, InterfaceClass);
+
+		if (bCompile)
+		{
+			FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompilerLog);
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
+		Result->SetStringField(TEXT("interface_name"), InterfaceClass->GetName());
+		Result->SetStringField(TEXT("interface_class"), InterfaceClass->GetPathName());
+		Result->SetStringField(TEXT("function_name"), FunctionFName.ToString());
+		Result->SetStringField(TEXT("implementation_type"), TEXT("function_graph"));
+		Result->SetBoolField(TEXT("changed"), true);
+		Result->SetStringField(TEXT("graph_name"), NewFunctionGraph->GetName());
+		Result->SetStringField(TEXT("graph_path"), NewFunctionGraph->GetPathName());
+		Result->SetBoolField(TEXT("compiled"), bCompile);
+		Result->SetNumberField(TEXT("num_errors"), CompilerLog.NumErrors);
+		Result->SetNumberField(TEXT("num_warnings"), CompilerLog.NumWarnings);
+		Result->SetArrayField(TEXT("messages"), BuildCompilerMessagesJson(CompilerLog));
 		return Result;
 	};
 

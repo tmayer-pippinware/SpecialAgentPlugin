@@ -140,6 +140,12 @@ Native Blueprint graph tools for node-based authoring workflows:
 - `blueprint/refresh_all_nodes`
 - `blueprint/get_blueprint_status`
 - `blueprint/list_blueprint_warnings`
+- `blueprint/list_interfaces`
+- `blueprint/add_interface`
+- `blueprint/remove_interface`
+- `blueprint/list_overridable_functions`
+- `blueprint/override_function`
+- `blueprint/implement_interface_function`
 
 ### Visual Feedback Loop
 
@@ -225,7 +231,7 @@ Your AI assistant now has access to:
 | Service | Methods | Description |
 |---------|:-------:|-------------|
 | **Python** | 3 | Execute scripts, run files, list modules |
-| **Blueprint** | 86 | Blueprint asset lifecycle, graph management, variable authoring, component SCS authoring, function/macro/dispatcher authoring, node authoring, pin operations, refactor/symbol operations, compile support, and diagnostics/validation |
+| **Blueprint** | 92 | Blueprint asset lifecycle, graph management, variable authoring, component SCS authoring, function/macro/dispatcher authoring, node authoring, pin operations, refactor/symbol operations, compile/diagnostics/validation, and interfaces/inheritance |
 | **Screenshot** | 2 | Capture viewport for AI vision |
 | **World** | 30+ | Actor manipulation and spatial queries |
 | **Assets** | 4 | Content Browser search and inspection |

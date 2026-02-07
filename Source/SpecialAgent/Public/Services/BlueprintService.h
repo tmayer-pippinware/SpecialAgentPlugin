@@ -111,6 +111,12 @@ private:
 	FMCPResponse HandleRefreshAllNodes(const FMCPRequest& Request);
 	FMCPResponse HandleGetBlueprintStatus(const FMCPRequest& Request);
 	FMCPResponse HandleListBlueprintWarnings(const FMCPRequest& Request);
+	FMCPResponse HandleListInterfaces(const FMCPRequest& Request);
+	FMCPResponse HandleAddInterface(const FMCPRequest& Request);
+	FMCPResponse HandleRemoveInterface(const FMCPRequest& Request);
+	FMCPResponse HandleListOverridableFunctions(const FMCPRequest& Request);
+	FMCPResponse HandleOverrideFunction(const FMCPRequest& Request);
+	FMCPResponse HandleImplementInterfaceFunction(const FMCPRequest& Request);
 	FMCPResponse HandleSetPinDefaultValue(const FMCPRequest& Request);
 	FMCPResponse HandleConnectPins(const FMCPRequest& Request);
 	FMCPResponse HandleCompileBlueprint(const FMCPRequest& Request);
