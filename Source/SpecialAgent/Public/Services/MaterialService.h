@@ -40,5 +40,12 @@ private:
 	FMCPResponse HandleAddCommentNode(const FMCPRequest& Request);
 	FMCPResponse HandleAddRerouteNode(const FMCPRequest& Request);
 	FMCPResponse HandleLayoutGraph(const FMCPRequest& Request);
+	FMCPResponse HandleListNodePins(const FMCPRequest& Request);
+	FMCPResponse HandleConnectPins(const FMCPRequest& Request);
+	FMCPResponse HandleDisconnectPins(const FMCPRequest& Request);
+	FMCPResponse HandleBreakPinLinks(const FMCPRequest& Request);
+	FMCPResponse HandleBreakAllNodeLinks(const FMCPRequest& Request);
+	FMCPResponse HandleSetPinDefaultValue(const FMCPRequest& Request);
+	FMCPResponse HandleResetPinDefaultValue(const FMCPRequest& Request);
 	FMCPResponse HandleCapabilities(const FMCPRequest& Request);
 };

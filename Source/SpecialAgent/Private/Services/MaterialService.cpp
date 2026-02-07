@@ -357,6 +357,330 @@ namespace
 		return Node;
 	}
 
+	static FString MaterialValueTypeToString(const uint64 TypeMask)
+	{
+		struct FTypeName
+		{
+			uint64 Mask;
+			const TCHAR* Name;
+		};
+
+		static const FTypeName TypeNames[] =
+		{
+			{ static_cast<uint64>(MCT_Float1), TEXT("float1") },
+			{ static_cast<uint64>(MCT_Float2), TEXT("float2") },
+			{ static_cast<uint64>(MCT_Float3), TEXT("float3") },
+			{ static_cast<uint64>(MCT_Float4), TEXT("float4") },
+			{ static_cast<uint64>(MCT_Texture2D), TEXT("texture2d") },
+			{ static_cast<uint64>(MCT_TextureCube), TEXT("texture_cube") },
+			{ static_cast<uint64>(MCT_Texture2DArray), TEXT("texture2d_array") },
+			{ static_cast<uint64>(MCT_TextureCubeArray), TEXT("texture_cube_array") },
+			{ static_cast<uint64>(MCT_VolumeTexture), TEXT("volume_texture") },
+			{ static_cast<uint64>(MCT_StaticBool), TEXT("static_bool") },
+			{ static_cast<uint64>(MCT_Bool), TEXT("bool") },
+			{ static_cast<uint64>(MCT_Unknown), TEXT("unknown") },
+			{ static_cast<uint64>(MCT_MaterialAttributes), TEXT("material_attributes") },
+			{ static_cast<uint64>(MCT_TextureExternal), TEXT("texture_external") },
+			{ static_cast<uint64>(MCT_TextureVirtual), TEXT("texture_virtual") },
+			{ static_cast<uint64>(MCT_SparseVolumeTexture), TEXT("sparse_volume_texture") },
+			{ static_cast<uint64>(MCT_VTPageTableResult), TEXT("vt_page_table_result") },
+			{ static_cast<uint64>(MCT_ShadingModel), TEXT("shading_model") },
+			{ static_cast<uint64>(MCT_Substrate), TEXT("substrate") },
+			{ static_cast<uint64>(MCT_LWCScalar), TEXT("lwc_scalar") },
+			{ static_cast<uint64>(MCT_LWCVector2), TEXT("lwc_vector2") },
+			{ static_cast<uint64>(MCT_LWCVector3), TEXT("lwc_vector3") },
+			{ static_cast<uint64>(MCT_LWCVector4), TEXT("lwc_vector4") },
+			{ static_cast<uint64>(MCT_Execution), TEXT("execution") },
+			{ static_cast<uint64>(MCT_VoidStatement), TEXT("void_statement") },
+			{ static_cast<uint64>(MCT_UInt1), TEXT("uint1") },
+			{ static_cast<uint64>(MCT_UInt2), TEXT("uint2") },
+			{ static_cast<uint64>(MCT_UInt3), TEXT("uint3") },
+			{ static_cast<uint64>(MCT_UInt4), TEXT("uint4") },
+			{ static_cast<uint64>(MCT_TextureCollection), TEXT("texture_collection") },
+			{ static_cast<uint64>(MCT_TextureMeshPaint), TEXT("texture_mesh_paint") },
+			{ static_cast<uint64>(MCT_TextureMaterialCache), TEXT("texture_material_cache") },
+			{ static_cast<uint64>(MCT_Float3x3), TEXT("float3x3") },
+			{ static_cast<uint64>(MCT_Float4x4), TEXT("float4x4") },
+			{ static_cast<uint64>(MCT_LWCMatrix), TEXT("lwc_matrix") },
+			{ static_cast<uint64>(MCT_MaterialCacheABuffer), TEXT("material_cache_abuffer") },
+			{ static_cast<uint64>(MCT_Unexposed), TEXT("unexposed") },
+		};
+
+		if (TypeMask == 0)
+		{
+			return TEXT("none");
+		}
+
+		TArray<FString> SetFlags;
+		for (const FTypeName& TypeName : TypeNames)
+		{
+			if ((TypeMask & TypeName.Mask) != 0)
+			{
+				SetFlags.Add(TypeName.Name);
+			}
+		}
+
+		if (SetFlags.Num() == 0)
+		{
+			return FString::Printf(TEXT("0x%llX"), TypeMask);
+		}
+
+		return FString::Join(SetFlags, TEXT("|"));
+	}
+
+	static FString GetInputPinDisplayName(UMaterialExpression* Node, int32 InputIndex, const FExpressionInput* Input)
+	{
+		if (!Node)
+		{
+			return FString();
+		}
+
+		const FName InputName = Node->GetInputName(InputIndex);
+		if (!InputName.IsNone())
+		{
+			return InputName.ToString();
+		}
+
+		if (Input && !Input->InputName.IsNone())
+		{
+			return Input->InputName.ToString();
+		}
+
+		return FString::Printf(TEXT("Input%d"), InputIndex);
+	}
+
+	static FString GetOutputPinDisplayName(UMaterialExpression* Node, int32 OutputIndex, const FExpressionOutput* Output)
+	{
+		if (Output && !Output->OutputName.IsNone())
+		{
+			return Output->OutputName.ToString();
+		}
+
+		return FString::Printf(TEXT("Output%d"), OutputIndex);
+	}
+
+	static bool TryResolveInputPinIndex(
+		UMaterialExpression* Node,
+		const FString& PinName,
+		const bool bHasPinIndex,
+		const int32 PinIndex,
+		int32& OutPinIndex,
+		FString& OutError)
+	{
+		if (!Node)
+		{
+			OutError = TEXT("Invalid node");
+			return false;
+		}
+
+		if (bHasPinIndex)
+		{
+			if (PinIndex < 0 || !Node->GetInput(PinIndex))
+			{
+				OutError = FString::Printf(TEXT("Input pin index out of range: %d"), PinIndex);
+				return false;
+			}
+
+			OutPinIndex = PinIndex;
+			return true;
+		}
+
+		const FString TrimmedName = PinName.TrimStartAndEnd();
+		if (!TrimmedName.IsEmpty())
+		{
+			for (int32 InputIndex = 0;; ++InputIndex)
+			{
+				FExpressionInput* Input = Node->GetInput(InputIndex);
+				if (!Input)
+				{
+					break;
+				}
+
+				const FString DisplayName = GetInputPinDisplayName(Node, InputIndex, Input);
+				if (DisplayName.Equals(TrimmedName, ESearchCase::IgnoreCase))
+				{
+					OutPinIndex = InputIndex;
+					return true;
+				}
+			}
+
+			OutError = FString::Printf(TEXT("Input pin not found: %s"), *TrimmedName);
+			return false;
+		}
+
+		if (Node->GetInput(0))
+		{
+			OutPinIndex = 0;
+			return true;
+		}
+
+		OutError = FString::Printf(TEXT("Node has no input pins: %s"), *Node->GetName());
+		return false;
+	}
+
+	static bool TryResolveOutputPinIndex(
+		UMaterialExpression* Node,
+		const FString& PinName,
+		const bool bHasPinIndex,
+		const int32 PinIndex,
+		int32& OutPinIndex,
+		FString& OutError)
+	{
+		if (!Node)
+		{
+			OutError = TEXT("Invalid node");
+			return false;
+		}
+
+		if (bHasPinIndex)
+		{
+			if (PinIndex < 0 || !Node->GetOutput(PinIndex))
+			{
+				OutError = FString::Printf(TEXT("Output pin index out of range: %d"), PinIndex);
+				return false;
+			}
+
+			OutPinIndex = PinIndex;
+			return true;
+		}
+
+		const FString TrimmedName = PinName.TrimStartAndEnd();
+		if (!TrimmedName.IsEmpty())
+		{
+			for (int32 OutputIndex = 0;; ++OutputIndex)
+			{
+				FExpressionOutput* Output = Node->GetOutput(OutputIndex);
+				if (!Output)
+				{
+					break;
+				}
+
+				const FString DisplayName = GetOutputPinDisplayName(Node, OutputIndex, Output);
+				if (DisplayName.Equals(TrimmedName, ESearchCase::IgnoreCase))
+				{
+					OutPinIndex = OutputIndex;
+					return true;
+				}
+			}
+
+			OutError = FString::Printf(TEXT("Output pin not found: %s"), *TrimmedName);
+			return false;
+		}
+
+		if (Node->GetOutput(0))
+		{
+			OutPinIndex = 0;
+			return true;
+		}
+
+		OutError = FString::Printf(TEXT("Node has no output pins: %s"), *Node->GetName());
+		return false;
+	}
+
+	static bool BreakExpressionInputLink(FExpressionInput* Input)
+	{
+		if (!Input || !Input->Expression)
+		{
+			return false;
+		}
+
+		Input->Expression = nullptr;
+		Input->OutputIndex = 0;
+		Input->SetMask(0, 0, 0, 0, 0);
+		return true;
+	}
+
+	static int32 CountOutputPinLinks(const FMaterialGraphContext& Context, UMaterialExpression* Node, int32 OutputIndex)
+	{
+		if (!Node)
+		{
+			return 0;
+		}
+
+		TArray<UMaterialExpression*> Expressions;
+		TArray<UMaterialExpressionComment*> Comments;
+		GatherGraphNodes(Context, Expressions, Comments);
+
+		int32 LinkCount = 0;
+		for (UMaterialExpression* Expression : Expressions)
+		{
+			if (!Expression)
+			{
+				continue;
+			}
+
+			for (int32 InputIndex = 0;; ++InputIndex)
+			{
+				FExpressionInput* Input = Expression->GetInput(InputIndex);
+				if (!Input)
+				{
+					break;
+				}
+
+				if (Input->Expression == Node && Input->OutputIndex == OutputIndex)
+				{
+					++LinkCount;
+				}
+			}
+		}
+
+		return LinkCount;
+	}
+
+	static TSharedPtr<FJsonObject> BuildInputPinJson(UMaterialExpression* Node, int32 InputIndex, FExpressionInput* Input, bool bIncludeDefaultValue)
+	{
+		TSharedPtr<FJsonObject> Pin = MakeShared<FJsonObject>();
+		Pin->SetStringField(TEXT("pin_direction"), TEXT("input"));
+		Pin->SetNumberField(TEXT("pin_index"), InputIndex);
+		Pin->SetStringField(TEXT("pin_name"), GetInputPinDisplayName(Node, InputIndex, Input));
+		Pin->SetNumberField(TEXT("value_type_mask"), static_cast<double>(Node ? static_cast<uint64>(Node->GetInputValueType(InputIndex)) : 0.0));
+		Pin->SetStringField(TEXT("value_type"), MaterialValueTypeToString(Node ? static_cast<uint64>(Node->GetInputValueType(InputIndex)) : 0));
+
+		const bool bConnected = Input && Input->Expression != nullptr;
+		Pin->SetBoolField(TEXT("connected"), bConnected);
+		if (bConnected)
+		{
+			Pin->SetStringField(TEXT("linked_node_id"), GetNodeId(Input->Expression));
+			Pin->SetStringField(TEXT("linked_node_name"), Input->Expression->GetName());
+			Pin->SetNumberField(TEXT("linked_output_index"), Input->OutputIndex);
+			Pin->SetStringField(TEXT("linked_output_name"), GetOutputPinDisplayName(Input->Expression, Input->OutputIndex, Input->Expression->GetOutput(Input->OutputIndex)));
+		}
+
+		Pin->SetBoolField(TEXT("mask_enabled"), Input ? Input->Mask != 0 : false);
+		Pin->SetNumberField(TEXT("mask"), Input ? Input->Mask : 0);
+		Pin->SetNumberField(TEXT("mask_r"), Input ? Input->MaskR : 0);
+		Pin->SetNumberField(TEXT("mask_g"), Input ? Input->MaskG : 0);
+		Pin->SetNumberField(TEXT("mask_b"), Input ? Input->MaskB : 0);
+		Pin->SetNumberField(TEXT("mask_a"), Input ? Input->MaskA : 0);
+
+		if (bIncludeDefaultValue)
+		{
+			Pin->SetStringField(TEXT("default_value"), Node ? Node->GetInputPinDefaultValue(InputIndex) : FString());
+		}
+
+		return Pin;
+	}
+
+	static TSharedPtr<FJsonObject> BuildOutputPinJson(const FMaterialGraphContext& Context, UMaterialExpression* Node, int32 OutputIndex, FExpressionOutput* Output)
+	{
+		TSharedPtr<FJsonObject> Pin = MakeShared<FJsonObject>();
+		Pin->SetStringField(TEXT("pin_direction"), TEXT("output"));
+		Pin->SetNumberField(TEXT("pin_index"), OutputIndex);
+		Pin->SetStringField(TEXT("pin_name"), GetOutputPinDisplayName(Node, OutputIndex, Output));
+		Pin->SetNumberField(TEXT("value_type_mask"), static_cast<double>(Node ? static_cast<uint64>(Node->GetOutputValueType(OutputIndex)) : 0.0));
+		Pin->SetStringField(TEXT("value_type"), MaterialValueTypeToString(Node ? static_cast<uint64>(Node->GetOutputValueType(OutputIndex)) : 0));
+		Pin->SetNumberField(TEXT("connected_link_count"), CountOutputPinLinks(Context, Node, OutputIndex));
+
+		Pin->SetBoolField(TEXT("mask_enabled"), Output ? Output->Mask != 0 : false);
+		Pin->SetNumberField(TEXT("mask"), Output ? Output->Mask : 0);
+		Pin->SetNumberField(TEXT("mask_r"), Output ? Output->MaskR : 0);
+		Pin->SetNumberField(TEXT("mask_g"), Output ? Output->MaskG : 0);
+		Pin->SetNumberField(TEXT("mask_b"), Output ? Output->MaskB : 0);
+		Pin->SetNumberField(TEXT("mask_a"), Output ? Output->MaskA : 0);
+
+		return Pin;
+	}
+
 	static const FUsageDescriptor* FindUsageDescriptor(const FString& Name)
 	{
 		for (const FUsageDescriptor& Descriptor : GUsageDescriptors)
@@ -550,6 +874,13 @@ TArray<FMCPToolInfo> FMaterialService::GetAvailableTools() const
 	AddTool(TEXT("add_comment_node"), TEXT("Add a comment node."));
 	AddTool(TEXT("add_reroute_node"), TEXT("Add a reroute node."));
 	AddTool(TEXT("layout_graph"), TEXT("Auto-layout graph nodes."));
+	AddTool(TEXT("list_node_pins"), TEXT("List pins for a graph node."));
+	AddTool(TEXT("connect_pins"), TEXT("Connect a node output pin to another node input pin."));
+	AddTool(TEXT("disconnect_pins"), TEXT("Disconnect a link between two nodes."));
+	AddTool(TEXT("break_pin_links"), TEXT("Break all links for a specific pin."));
+	AddTool(TEXT("break_all_node_links"), TEXT("Break all incoming and outgoing links for a node."));
+	AddTool(TEXT("set_pin_default_value"), TEXT("Set the default value for an input pin."));
+	AddTool(TEXT("reset_pin_default_value"), TEXT("Reset an input pin default value to class defaults."));
 	AddTool(TEXT("capabilities"), TEXT("Report baseline material service capabilities and module availability."));
 	return Tools;
 }
@@ -574,6 +905,13 @@ FMCPResponse FMaterialService::HandleRequest(const FMCPRequest& Request, const F
 	if (MethodName == TEXT("add_comment_node")) return HandleAddCommentNode(Request);
 	if (MethodName == TEXT("add_reroute_node")) return HandleAddRerouteNode(Request);
 	if (MethodName == TEXT("layout_graph")) return HandleLayoutGraph(Request);
+	if (MethodName == TEXT("list_node_pins")) return HandleListNodePins(Request);
+	if (MethodName == TEXT("connect_pins")) return HandleConnectPins(Request);
+	if (MethodName == TEXT("disconnect_pins")) return HandleDisconnectPins(Request);
+	if (MethodName == TEXT("break_pin_links")) return HandleBreakPinLinks(Request);
+	if (MethodName == TEXT("break_all_node_links")) return HandleBreakAllNodeLinks(Request);
+	if (MethodName == TEXT("set_pin_default_value")) return HandleSetPinDefaultValue(Request);
+	if (MethodName == TEXT("reset_pin_default_value")) return HandleResetPinDefaultValue(Request);
 	if (MethodName == TEXT("capabilities")) return HandleCapabilities(Request);
 	return MethodNotFound(Request.Id, TEXT("material"), MethodName);
 }
@@ -1581,6 +1919,835 @@ FMCPResponse FMaterialService::HandleLayoutGraph(const FMCPRequest& Request)
 	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
 }
 
+FMCPResponse FMaterialService::HandleListNodePins(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString NodeId;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+
+	bool bIncludeDefaultValues = true;
+	Request.Params->TryGetBoolField(TEXT("include_default_values"), bIncludeDefaultValues);
+
+	auto Task = [AssetPath, NodeId, bIncludeDefaultValues]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpression* Node = FindNodeById(Context, NodeId);
+		if (!Node)
+		{
+			return MakeFailure(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		}
+		if (Node->IsA<UMaterialExpressionComment>())
+		{
+			return MakeFailure(TEXT("Comment nodes do not have material pins"));
+		}
+
+		TArray<TSharedPtr<FJsonValue>> InputPins;
+		for (int32 InputIndex = 0;; ++InputIndex)
+		{
+			FExpressionInput* Input = Node->GetInput(InputIndex);
+			if (!Input)
+			{
+				break;
+			}
+			InputPins.Add(MakeShared<FJsonValueObject>(BuildInputPinJson(Node, InputIndex, Input, bIncludeDefaultValues)));
+		}
+
+		TArray<TSharedPtr<FJsonValue>> OutputPins;
+		for (int32 OutputIndex = 0;; ++OutputIndex)
+		{
+			FExpressionOutput* Output = Node->GetOutput(OutputIndex);
+			if (!Output)
+			{
+				break;
+			}
+			OutputPins.Add(MakeShared<FJsonValueObject>(BuildOutputPinJson(Context, Node, OutputIndex, Output)));
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("node_id"), GetNodeId(Node));
+		Result->SetStringField(TEXT("node_name"), Node->GetName());
+		Result->SetStringField(TEXT("node_class"), Node->GetClass()->GetName());
+		Result->SetArrayField(TEXT("input_pins"), InputPins);
+		Result->SetArrayField(TEXT("output_pins"), OutputPins);
+		Result->SetNumberField(TEXT("input_pin_count"), InputPins.Num());
+		Result->SetNumberField(TEXT("output_pin_count"), OutputPins.Num());
+		Result->SetBoolField(TEXT("include_default_values"), bIncludeDefaultValues);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleConnectPins(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString FromNodeId;
+	FString ToNodeId;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("from_node_id"), FromNodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'from_node_id'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("to_node_id"), ToNodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'to_node_id'"));
+	}
+
+	FString FromOutputPin;
+	FString ToInputPin;
+	Request.Params->TryGetStringField(TEXT("from_output_pin"), FromOutputPin);
+	Request.Params->TryGetStringField(TEXT("to_input_pin"), ToInputPin);
+
+	bool bHasFromOutputIndex = false;
+	bool bHasToInputIndex = false;
+	int32 FromOutputIndex = 0;
+	int32 ToInputIndex = 0;
+	double NumericField = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("from_output_index"), NumericField))
+	{
+		bHasFromOutputIndex = true;
+		FromOutputIndex = static_cast<int32>(NumericField);
+	}
+	if (Request.Params->TryGetNumberField(TEXT("to_input_index"), NumericField))
+	{
+		bHasToInputIndex = true;
+		ToInputIndex = static_cast<int32>(NumericField);
+	}
+
+	auto Task = [AssetPath, FromNodeId, ToNodeId, FromOutputPin, ToInputPin, bHasFromOutputIndex, FromOutputIndex, bHasToInputIndex, ToInputIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpression* FromNode = FindNodeById(Context, FromNodeId);
+		if (!FromNode)
+		{
+			return MakeFailure(FString::Printf(TEXT("Source node not found: %s"), *FromNodeId));
+		}
+		UMaterialExpression* ToNode = FindNodeById(Context, ToNodeId);
+		if (!ToNode)
+		{
+			return MakeFailure(FString::Printf(TEXT("Target node not found: %s"), *ToNodeId));
+		}
+		if (FromNode->IsA<UMaterialExpressionComment>() || ToNode->IsA<UMaterialExpressionComment>())
+		{
+			return MakeFailure(TEXT("Cannot connect comment nodes"));
+		}
+
+		int32 ResolvedFromOutputIndex = INDEX_NONE;
+		if (!TryResolveOutputPinIndex(FromNode, FromOutputPin, bHasFromOutputIndex, FromOutputIndex, ResolvedFromOutputIndex, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		int32 ResolvedToInputIndex = INDEX_NONE;
+		if (!TryResolveInputPinIndex(ToNode, ToInputPin, bHasToInputIndex, ToInputIndex, ResolvedToInputIndex, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		FExpressionInput* Input = ToNode->GetInput(ResolvedToInputIndex);
+		if (!Input)
+		{
+			return MakeFailure(FString::Printf(TEXT("Target input pin index out of range: %d"), ResolvedToInputIndex));
+		}
+
+		FromNode->Modify();
+		ToNode->Modify();
+		FromNode->ConnectExpression(Input, ResolvedFromOutputIndex);
+		Context.MarkDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("from_node_id"), GetNodeId(FromNode));
+		Result->SetStringField(TEXT("to_node_id"), GetNodeId(ToNode));
+		Result->SetNumberField(TEXT("from_output_index"), ResolvedFromOutputIndex);
+		Result->SetStringField(TEXT("from_output_name"), GetOutputPinDisplayName(FromNode, ResolvedFromOutputIndex, FromNode->GetOutput(ResolvedFromOutputIndex)));
+		Result->SetNumberField(TEXT("to_input_index"), ResolvedToInputIndex);
+		Result->SetStringField(TEXT("to_input_name"), GetInputPinDisplayName(ToNode, ResolvedToInputIndex, Input));
+		Result->SetObjectField(TEXT("to_input_pin"), BuildInputPinJson(ToNode, ResolvedToInputIndex, Input, true));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleDisconnectPins(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString FromNodeId;
+	FString ToNodeId;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("from_node_id"), FromNodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'from_node_id'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("to_node_id"), ToNodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'to_node_id'"));
+	}
+
+	FString FromOutputPin;
+	FString ToInputPin;
+	Request.Params->TryGetStringField(TEXT("from_output_pin"), FromOutputPin);
+	Request.Params->TryGetStringField(TEXT("to_input_pin"), ToInputPin);
+
+	bool bHasFromOutputIndex = false;
+	bool bHasToInputIndex = false;
+	int32 FromOutputIndex = 0;
+	int32 ToInputIndex = 0;
+	double NumericField = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("from_output_index"), NumericField))
+	{
+		bHasFromOutputIndex = true;
+		FromOutputIndex = static_cast<int32>(NumericField);
+	}
+	if (Request.Params->TryGetNumberField(TEXT("to_input_index"), NumericField))
+	{
+		bHasToInputIndex = true;
+		ToInputIndex = static_cast<int32>(NumericField);
+	}
+
+	auto Task = [AssetPath, FromNodeId, ToNodeId, FromOutputPin, ToInputPin, bHasFromOutputIndex, FromOutputIndex, bHasToInputIndex, ToInputIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpression* FromNode = FindNodeById(Context, FromNodeId);
+		if (!FromNode)
+		{
+			return MakeFailure(FString::Printf(TEXT("Source node not found: %s"), *FromNodeId));
+		}
+		UMaterialExpression* ToNode = FindNodeById(Context, ToNodeId);
+		if (!ToNode)
+		{
+			return MakeFailure(FString::Printf(TEXT("Target node not found: %s"), *ToNodeId));
+		}
+		if (FromNode->IsA<UMaterialExpressionComment>() || ToNode->IsA<UMaterialExpressionComment>())
+		{
+			return MakeFailure(TEXT("Cannot disconnect comment nodes"));
+		}
+
+		const bool bHasFromSelector = bHasFromOutputIndex || !FromOutputPin.TrimStartAndEnd().IsEmpty();
+		const bool bHasToSelector = bHasToInputIndex || !ToInputPin.TrimStartAndEnd().IsEmpty();
+
+		int32 ResolvedFromOutputIndex = INDEX_NONE;
+		if (bHasFromSelector)
+		{
+			if (!TryResolveOutputPinIndex(FromNode, FromOutputPin, bHasFromOutputIndex, FromOutputIndex, ResolvedFromOutputIndex, Error))
+			{
+				return MakeFailure(Error);
+			}
+		}
+
+		int32 ResolvedToInputIndex = INDEX_NONE;
+		if (bHasToSelector)
+		{
+			if (!TryResolveInputPinIndex(ToNode, ToInputPin, bHasToInputIndex, ToInputIndex, ResolvedToInputIndex, Error))
+			{
+				return MakeFailure(Error);
+			}
+		}
+
+		int32 DisconnectedLinks = 0;
+		ToNode->Modify();
+
+		auto TryDisconnectInputByIndex = [&](int32 InputIndex)
+		{
+			FExpressionInput* Input = ToNode->GetInput(InputIndex);
+			if (!Input || Input->Expression != FromNode)
+			{
+				return;
+			}
+			if (bHasFromSelector && Input->OutputIndex != ResolvedFromOutputIndex)
+			{
+				return;
+			}
+			if (BreakExpressionInputLink(Input))
+			{
+				++DisconnectedLinks;
+			}
+		};
+
+		if (bHasToSelector)
+		{
+			TryDisconnectInputByIndex(ResolvedToInputIndex);
+		}
+		else
+		{
+			for (int32 InputIndex = 0;; ++InputIndex)
+			{
+				FExpressionInput* Input = ToNode->GetInput(InputIndex);
+				if (!Input)
+				{
+					break;
+				}
+				TryDisconnectInputByIndex(InputIndex);
+			}
+		}
+
+		if (DisconnectedLinks > 0)
+		{
+			Context.MarkDirty();
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("from_node_id"), GetNodeId(FromNode));
+		Result->SetStringField(TEXT("to_node_id"), GetNodeId(ToNode));
+		Result->SetNumberField(TEXT("disconnected_links"), DisconnectedLinks);
+		Result->SetBoolField(TEXT("changed"), DisconnectedLinks > 0);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleBreakPinLinks(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString NodeId;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+
+	FString PinDirection;
+	Request.Params->TryGetStringField(TEXT("pin_direction"), PinDirection);
+
+	FString PinName;
+	Request.Params->TryGetStringField(TEXT("pin_name"), PinName);
+
+	bool bHasPinIndex = false;
+	int32 PinIndex = 0;
+	double NumericField = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("pin_index"), NumericField))
+	{
+		bHasPinIndex = true;
+		PinIndex = static_cast<int32>(NumericField);
+	}
+
+	FString InputPinName;
+	FString OutputPinName;
+	Request.Params->TryGetStringField(TEXT("input_pin"), InputPinName);
+	Request.Params->TryGetStringField(TEXT("output_pin"), OutputPinName);
+
+	bool bHasInputIndex = false;
+	bool bHasOutputIndex = false;
+	int32 InputIndex = 0;
+	int32 OutputIndex = 0;
+	if (Request.Params->TryGetNumberField(TEXT("input_index"), NumericField))
+	{
+		bHasInputIndex = true;
+		InputIndex = static_cast<int32>(NumericField);
+	}
+	if (Request.Params->TryGetNumberField(TEXT("output_index"), NumericField))
+	{
+		bHasOutputIndex = true;
+		OutputIndex = static_cast<int32>(NumericField);
+	}
+
+	auto Task = [AssetPath, NodeId, PinDirection, PinName, bHasPinIndex, PinIndex, InputPinName, OutputPinName, bHasInputIndex, InputIndex, bHasOutputIndex, OutputIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpression* Node = FindNodeById(Context, NodeId);
+		if (!Node)
+		{
+			return MakeFailure(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		}
+		if (Node->IsA<UMaterialExpressionComment>())
+		{
+			return MakeFailure(TEXT("Comment nodes do not have material pins"));
+		}
+
+		FString Direction = PinDirection.TrimStartAndEnd();
+		if (Direction.IsEmpty())
+		{
+			if (!InputPinName.TrimStartAndEnd().IsEmpty() || bHasInputIndex)
+			{
+				Direction = TEXT("input");
+			}
+			else if (!OutputPinName.TrimStartAndEnd().IsEmpty() || bHasOutputIndex)
+			{
+				Direction = TEXT("output");
+			}
+			else
+			{
+				Direction = TEXT("input");
+			}
+		}
+
+		int32 BrokenLinks = 0;
+		int32 ResolvedPinIndex = INDEX_NONE;
+		Node->Modify();
+
+		if (Direction.Equals(TEXT("input"), ESearchCase::IgnoreCase))
+		{
+			const FString EffectivePinName = !InputPinName.TrimStartAndEnd().IsEmpty() ? InputPinName : PinName;
+			const bool bEffectiveHasPinIndex = bHasInputIndex || bHasPinIndex;
+			const int32 EffectivePinIndex = bHasInputIndex ? InputIndex : PinIndex;
+			if (!TryResolveInputPinIndex(Node, EffectivePinName, bEffectiveHasPinIndex, EffectivePinIndex, ResolvedPinIndex, Error))
+			{
+				return MakeFailure(Error);
+			}
+
+			FExpressionInput* Input = Node->GetInput(ResolvedPinIndex);
+			if (BreakExpressionInputLink(Input))
+			{
+				BrokenLinks = 1;
+			}
+		}
+		else if (Direction.Equals(TEXT("output"), ESearchCase::IgnoreCase))
+		{
+			const FString EffectivePinName = !OutputPinName.TrimStartAndEnd().IsEmpty() ? OutputPinName : PinName;
+			const bool bEffectiveHasPinIndex = bHasOutputIndex || bHasPinIndex;
+			const int32 EffectivePinIndex = bHasOutputIndex ? OutputIndex : PinIndex;
+			if (!TryResolveOutputPinIndex(Node, EffectivePinName, bEffectiveHasPinIndex, EffectivePinIndex, ResolvedPinIndex, Error))
+			{
+				return MakeFailure(Error);
+			}
+
+			TArray<UMaterialExpression*> Expressions;
+			TArray<UMaterialExpressionComment*> Comments;
+			GatherGraphNodes(Context, Expressions, Comments);
+
+			for (UMaterialExpression* Expression : Expressions)
+			{
+				if (!Expression)
+				{
+					continue;
+				}
+
+				for (int32 InputPinIndex = 0;; ++InputPinIndex)
+				{
+					FExpressionInput* Input = Expression->GetInput(InputPinIndex);
+					if (!Input)
+					{
+						break;
+					}
+
+					if (Input->Expression == Node && Input->OutputIndex == ResolvedPinIndex)
+					{
+						Expression->Modify();
+						if (BreakExpressionInputLink(Input))
+						{
+							++BrokenLinks;
+						}
+					}
+				}
+			}
+		}
+		else
+		{
+			return MakeFailure(FString::Printf(TEXT("Invalid pin_direction '%s'. Expected 'input' or 'output'."), *Direction));
+		}
+
+		if (BrokenLinks > 0)
+		{
+			Context.MarkDirty();
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("node_id"), GetNodeId(Node));
+		Result->SetStringField(TEXT("pin_direction"), Direction.ToLower());
+		Result->SetNumberField(TEXT("pin_index"), ResolvedPinIndex);
+		Result->SetNumberField(TEXT("broken_links"), BrokenLinks);
+		Result->SetBoolField(TEXT("changed"), BrokenLinks > 0);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleBreakAllNodeLinks(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString NodeId;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+
+	auto Task = [AssetPath, NodeId]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpression* Node = FindNodeById(Context, NodeId);
+		if (!Node)
+		{
+			return MakeFailure(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		}
+		if (Node->IsA<UMaterialExpressionComment>())
+		{
+			TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+			Result->SetStringField(TEXT("node_id"), GetNodeId(Node));
+			Result->SetNumberField(TEXT("broken_links"), 0);
+			Result->SetBoolField(TEXT("changed"), false);
+			return Result;
+		}
+
+		int32 BrokenLinks = 0;
+		Node->Modify();
+
+		for (int32 InputIndex = 0;; ++InputIndex)
+		{
+			FExpressionInput* Input = Node->GetInput(InputIndex);
+			if (!Input)
+			{
+				break;
+			}
+			if (BreakExpressionInputLink(Input))
+			{
+				++BrokenLinks;
+			}
+		}
+
+		TArray<UMaterialExpression*> Expressions;
+		TArray<UMaterialExpressionComment*> Comments;
+		GatherGraphNodes(Context, Expressions, Comments);
+
+		for (UMaterialExpression* Expression : Expressions)
+		{
+			if (!Expression)
+			{
+				continue;
+			}
+
+			for (int32 InputIndex = 0;; ++InputIndex)
+			{
+				FExpressionInput* Input = Expression->GetInput(InputIndex);
+				if (!Input)
+				{
+					break;
+				}
+				if (Input->Expression == Node)
+				{
+					Expression->Modify();
+					if (BreakExpressionInputLink(Input))
+					{
+						++BrokenLinks;
+					}
+				}
+			}
+		}
+
+		if (BrokenLinks > 0)
+		{
+			Context.MarkDirty();
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("node_id"), GetNodeId(Node));
+		Result->SetNumberField(TEXT("broken_links"), BrokenLinks);
+		Result->SetBoolField(TEXT("changed"), BrokenLinks > 0);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleSetPinDefaultValue(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString NodeId;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+
+	FString InputPinName;
+	Request.Params->TryGetStringField(TEXT("input_pin"), InputPinName);
+
+	bool bHasInputIndex = false;
+	int32 InputIndex = 0;
+	double NumericField = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("input_index"), NumericField))
+	{
+		bHasInputIndex = true;
+		InputIndex = static_cast<int32>(NumericField);
+	}
+
+	FString DefaultValue;
+	if (!Request.Params->TryGetStringField(TEXT("default_value"), DefaultValue))
+	{
+		double DefaultNumericValue = 0.0;
+		bool bDefaultBoolValue = false;
+		if (Request.Params->TryGetNumberField(TEXT("default_value"), DefaultNumericValue))
+		{
+			DefaultValue = FString::SanitizeFloat(DefaultNumericValue);
+		}
+		else if (Request.Params->TryGetBoolField(TEXT("default_value"), bDefaultBoolValue))
+		{
+			DefaultValue = bDefaultBoolValue ? TEXT("true") : TEXT("false");
+		}
+		else
+		{
+			return InvalidParams(Request.Id, TEXT("Missing required parameter 'default_value'"));
+		}
+	}
+
+	auto Task = [AssetPath, NodeId, InputPinName, bHasInputIndex, InputIndex, DefaultValue]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpression* Node = FindNodeById(Context, NodeId);
+		if (!Node)
+		{
+			return MakeFailure(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		}
+		if (Node->IsA<UMaterialExpressionComment>())
+		{
+			return MakeFailure(TEXT("Comment nodes do not have input pins"));
+		}
+
+		int32 ResolvedInputIndex = INDEX_NONE;
+		if (!TryResolveInputPinIndex(Node, InputPinName, bHasInputIndex, InputIndex, ResolvedInputIndex, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		FExpressionInput* Input = Node->GetInput(ResolvedInputIndex);
+		if (!Input)
+		{
+			return MakeFailure(FString::Printf(TEXT("Input pin index out of range: %d"), ResolvedInputIndex));
+		}
+
+		Node->Modify();
+		bool bApplied = false;
+		for (FProperty* Property : Node->GetInputPinProperty(ResolvedInputIndex))
+		{
+			if (!Property)
+			{
+				continue;
+			}
+
+			void* PropertyValuePtr = Property->ContainerPtrToValuePtr<void>(Node);
+			if (PropertyValuePtr && Property->ImportText_Direct(*DefaultValue, PropertyValuePtr, Node, PPF_None))
+			{
+				bApplied = true;
+			}
+		}
+
+		if (!bApplied)
+		{
+			return MakeFailure(FString::Printf(TEXT("Could not apply default value '%s' to input pin '%s'"), *DefaultValue, *GetInputPinDisplayName(Node, ResolvedInputIndex, Input)));
+		}
+
+		Context.MarkDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("node_id"), GetNodeId(Node));
+		Result->SetNumberField(TEXT("input_index"), ResolvedInputIndex);
+		Result->SetStringField(TEXT("input_name"), GetInputPinDisplayName(Node, ResolvedInputIndex, Input));
+		Result->SetStringField(TEXT("requested_default_value"), DefaultValue);
+		Result->SetStringField(TEXT("applied_default_value"), Node->GetInputPinDefaultValue(ResolvedInputIndex));
+		Result->SetObjectField(TEXT("input_pin"), BuildInputPinJson(Node, ResolvedInputIndex, Input, true));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleResetPinDefaultValue(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString NodeId;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("node_id"), NodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'node_id'"));
+	}
+
+	FString InputPinName;
+	Request.Params->TryGetStringField(TEXT("input_pin"), InputPinName);
+
+	bool bHasInputIndex = false;
+	int32 InputIndex = 0;
+	double NumericField = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("input_index"), NumericField))
+	{
+		bHasInputIndex = true;
+		InputIndex = static_cast<int32>(NumericField);
+	}
+
+	auto Task = [AssetPath, NodeId, InputPinName, bHasInputIndex, InputIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpression* Node = FindNodeById(Context, NodeId);
+		if (!Node)
+		{
+			return MakeFailure(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+		}
+		if (Node->IsA<UMaterialExpressionComment>())
+		{
+			return MakeFailure(TEXT("Comment nodes do not have input pins"));
+		}
+
+		int32 ResolvedInputIndex = INDEX_NONE;
+		if (!TryResolveInputPinIndex(Node, InputPinName, bHasInputIndex, InputIndex, ResolvedInputIndex, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		FExpressionInput* Input = Node->GetInput(ResolvedInputIndex);
+		if (!Input)
+		{
+			return MakeFailure(FString::Printf(TEXT("Input pin index out of range: %d"), ResolvedInputIndex));
+		}
+
+		UMaterialExpression* ClassDefaultObject = Node->GetClass()->GetDefaultObject<UMaterialExpression>();
+		if (!ClassDefaultObject)
+		{
+			return MakeFailure(TEXT("Failed to resolve class default object"));
+		}
+
+		const FString DefaultValue = ClassDefaultObject->GetInputPinDefaultValue(ResolvedInputIndex);
+
+		Node->Modify();
+		bool bCopiedProperties = false;
+		for (FProperty* Property : Node->GetInputPinProperty(ResolvedInputIndex))
+		{
+			if (!Property)
+			{
+				continue;
+			}
+
+			Property->CopyCompleteValue_InContainer(Node, ClassDefaultObject);
+			bCopiedProperties = true;
+		}
+
+		if (!bCopiedProperties)
+		{
+			return MakeFailure(FString::Printf(TEXT("Input pin does not expose a resettable default value: %s"), *GetInputPinDisplayName(Node, ResolvedInputIndex, Input)));
+		}
+
+		Context.MarkDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("node_id"), GetNodeId(Node));
+		Result->SetNumberField(TEXT("input_index"), ResolvedInputIndex);
+		Result->SetStringField(TEXT("input_name"), GetInputPinDisplayName(Node, ResolvedInputIndex, Input));
+		Result->SetStringField(TEXT("reset_default_value"), Node->GetInputPinDefaultValue(ResolvedInputIndex));
+		Result->SetObjectField(TEXT("input_pin"), BuildInputPinJson(Node, ResolvedInputIndex, Input, true));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
 FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 {
 	auto Task = []() -> TSharedPtr<FJsonObject>
@@ -1598,6 +2765,7 @@ FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 		TSharedPtr<FJsonObject> PhasesObj = MakeShared<FJsonObject>();
 		PhasesObj->SetBoolField(TEXT("phase_1_asset_class_lifecycle"), true);
 		PhasesObj->SetBoolField(TEXT("phase_2_graph_management"), true);
+		PhasesObj->SetBoolField(TEXT("phase_3_pin_wiring_operations"), true);
 		Result->SetObjectField(TEXT("phases"), PhasesObj);
 
 		TSharedPtr<FJsonObject> DependenciesObj = MakeShared<FJsonObject>();
