@@ -806,6 +806,199 @@ namespace
 		return false;
 	}
 
+	struct FMaterialOutputAlias
+	{
+		const TCHAR* Name;
+		EMaterialProperty Property;
+	};
+
+	static const FMaterialOutputAlias GMaterialOutputAliases[] =
+	{
+		{ TEXT("emissive"), MP_EmissiveColor },
+		{ TEXT("emissive_color"), MP_EmissiveColor },
+		{ TEXT("opacity"), MP_Opacity },
+		{ TEXT("opacity_mask"), MP_OpacityMask },
+		{ TEXT("base_color"), MP_BaseColor },
+		{ TEXT("basecolor"), MP_BaseColor },
+		{ TEXT("diffuse"), MP_BaseColor },
+		{ TEXT("metallic"), MP_Metallic },
+		{ TEXT("specular"), MP_Specular },
+		{ TEXT("roughness"), MP_Roughness },
+		{ TEXT("anisotropy"), MP_Anisotropy },
+		{ TEXT("normal"), MP_Normal },
+		{ TEXT("tangent"), MP_Tangent },
+		{ TEXT("world_position_offset"), MP_WorldPositionOffset },
+		{ TEXT("worldpositionoffset"), MP_WorldPositionOffset },
+		{ TEXT("wpo"), MP_WorldPositionOffset },
+		{ TEXT("subsurface"), MP_SubsurfaceColor },
+		{ TEXT("subsurface_color"), MP_SubsurfaceColor },
+		{ TEXT("ambient_occlusion"), MP_AmbientOcclusion },
+		{ TEXT("ao"), MP_AmbientOcclusion },
+		{ TEXT("refraction"), MP_Refraction },
+		{ TEXT("front_material"), MP_FrontMaterial },
+		{ TEXT("surface_thickness"), MP_SurfaceThickness },
+		{ TEXT("displacement"), MP_Displacement },
+		{ TEXT("material_attributes"), MP_MaterialAttributes },
+		{ TEXT("shading_model"), MP_ShadingModel },
+		{ TEXT("pixel_depth_offset"), MP_PixelDepthOffset },
+		{ TEXT("pdo"), MP_PixelDepthOffset },
+	};
+
+	static bool IsCustomUVProperty(const EMaterialProperty Property)
+	{
+		const int32 PropertyIndex = static_cast<int32>(Property);
+		const int32 FirstCustomUVPropertyIndex = static_cast<int32>(MP_CustomizedUVs0);
+		return PropertyIndex >= FirstCustomUVPropertyIndex && PropertyIndex < FirstCustomUVPropertyIndex + 8;
+	}
+
+	static bool TryGetCustomUVIndex(const EMaterialProperty Property, int32& OutCustomUVIndex)
+	{
+		if (!IsCustomUVProperty(Property))
+		{
+			OutCustomUVIndex = INDEX_NONE;
+			return false;
+		}
+
+		const int32 FirstCustomUVPropertyIndex = static_cast<int32>(MP_CustomizedUVs0);
+		OutCustomUVIndex = static_cast<int32>(Property) - FirstCustomUVPropertyIndex;
+		return true;
+	}
+
+	static FString MaterialPropertyToOutputName(const EMaterialProperty Property)
+	{
+		int32 CustomUVIndex = INDEX_NONE;
+		if (TryGetCustomUVIndex(Property, CustomUVIndex))
+		{
+			return FString::Printf(TEXT("custom_uv_%d"), CustomUVIndex);
+		}
+
+		switch (Property)
+		{
+		case MP_EmissiveColor: return TEXT("emissive_color");
+		case MP_Opacity: return TEXT("opacity");
+		case MP_OpacityMask: return TEXT("opacity_mask");
+		case MP_BaseColor: return TEXT("base_color");
+		case MP_Metallic: return TEXT("metallic");
+		case MP_Specular: return TEXT("specular");
+		case MP_Roughness: return TEXT("roughness");
+		case MP_Anisotropy: return TEXT("anisotropy");
+		case MP_Normal: return TEXT("normal");
+		case MP_Tangent: return TEXT("tangent");
+		case MP_WorldPositionOffset: return TEXT("world_position_offset");
+		case MP_SubsurfaceColor: return TEXT("subsurface_color");
+		case MP_AmbientOcclusion: return TEXT("ambient_occlusion");
+		case MP_Refraction: return TEXT("refraction");
+		case MP_PixelDepthOffset: return TEXT("pixel_depth_offset");
+		case MP_ShadingModel: return TEXT("shading_model");
+		case MP_FrontMaterial: return TEXT("front_material");
+		case MP_SurfaceThickness: return TEXT("surface_thickness");
+		case MP_Displacement: return TEXT("displacement");
+		case MP_MaterialAttributes: return TEXT("material_attributes");
+		default: return TEXT("unknown");
+		}
+	}
+
+	static void AddPhase4MaterialOutputProperties(TArray<EMaterialProperty>& OutProperties)
+	{
+		OutProperties.Add(MP_BaseColor);
+		OutProperties.Add(MP_Metallic);
+		OutProperties.Add(MP_Specular);
+		OutProperties.Add(MP_Roughness);
+		OutProperties.Add(MP_Anisotropy);
+		OutProperties.Add(MP_Normal);
+		OutProperties.Add(MP_Tangent);
+		OutProperties.Add(MP_EmissiveColor);
+		OutProperties.Add(MP_Opacity);
+		OutProperties.Add(MP_OpacityMask);
+		OutProperties.Add(MP_WorldPositionOffset);
+		OutProperties.Add(MP_SubsurfaceColor);
+		OutProperties.Add(MP_AmbientOcclusion);
+		OutProperties.Add(MP_Refraction);
+		OutProperties.Add(MP_PixelDepthOffset);
+		OutProperties.Add(MP_ShadingModel);
+		OutProperties.Add(MP_FrontMaterial);
+		OutProperties.Add(MP_SurfaceThickness);
+		OutProperties.Add(MP_Displacement);
+		OutProperties.Add(MP_MaterialAttributes);
+		for (int32 CustomUVIndex = 0; CustomUVIndex < 8; ++CustomUVIndex)
+		{
+			OutProperties.Add(static_cast<EMaterialProperty>(static_cast<int32>(MP_CustomizedUVs0) + CustomUVIndex));
+		}
+	}
+
+	static bool ParseMaterialOutputProperty(
+		const FString& OutputNameInput,
+		const bool bHasCustomUVIndex,
+		const int32 CustomUVIndex,
+		EMaterialProperty& OutProperty,
+		FString& OutResolvedOutputName,
+		FString& OutError)
+	{
+		FString Normalized = OutputNameInput.TrimStartAndEnd().ToLower();
+		Normalized = Normalized.Replace(TEXT(" "), TEXT("_"));
+		Normalized = Normalized.Replace(TEXT("-"), TEXT("_"));
+
+		if (Normalized.IsEmpty())
+		{
+			OutError = TEXT("Missing output property name");
+			return false;
+		}
+
+		if (Normalized.StartsWith(TEXT("custom_uv")))
+		{
+			int32 ParsedCustomUVIndex = INDEX_NONE;
+			if (bHasCustomUVIndex)
+			{
+				ParsedCustomUVIndex = CustomUVIndex;
+			}
+			else
+			{
+				FString Suffix = Normalized.RightChop(9); // "custom_uv"
+				if (Suffix.StartsWith(TEXT("_")))
+				{
+					Suffix = Suffix.RightChop(1);
+				}
+				if (!Suffix.IsEmpty() && FDefaultValueHelper::ParseInt(Suffix, ParsedCustomUVIndex))
+				{
+					// Parsed from output_name
+				}
+			}
+
+			if (ParsedCustomUVIndex < 0 || ParsedCustomUVIndex > 7)
+			{
+				OutError = TEXT("Custom UV output requires uv_index in range [0, 7] (or output_name like custom_uv_0)");
+				return false;
+			}
+
+			OutProperty = static_cast<EMaterialProperty>(static_cast<int32>(MP_CustomizedUVs0) + ParsedCustomUVIndex);
+			OutResolvedOutputName = FString::Printf(TEXT("custom_uv_%d"), ParsedCustomUVIndex);
+			return true;
+		}
+
+		for (const FMaterialOutputAlias& Alias : GMaterialOutputAliases)
+		{
+			if (Normalized.Equals(Alias.Name, ESearchCase::CaseSensitive))
+			{
+				OutProperty = Alias.Property;
+				OutResolvedOutputName = MaterialPropertyToOutputName(Alias.Property);
+				return true;
+			}
+		}
+
+		int32 NumericProperty = INDEX_NONE;
+		if (FDefaultValueHelper::ParseInt(Normalized, NumericProperty) &&
+			NumericProperty >= 0 &&
+			NumericProperty < static_cast<int32>(MP_MAX))
+		{
+			OutProperty = static_cast<EMaterialProperty>(NumericProperty);
+			OutResolvedOutputName = MaterialPropertyToOutputName(OutProperty);
+			return true;
+		}
+
+		OutError = FString::Printf(TEXT("Unknown material output property: %s"), *OutputNameInput);
+		return false;
+	}
+
 	static void WriteMaterialSettings(const UMaterial* Material, const TSharedPtr<FJsonObject>& Result)
 	{
 		Result->SetStringField(TEXT("domain"), DomainToString(Material->MaterialDomain));
@@ -881,6 +1074,11 @@ TArray<FMCPToolInfo> FMaterialService::GetAvailableTools() const
 	AddTool(TEXT("break_all_node_links"), TEXT("Break all incoming and outgoing links for a node."));
 	AddTool(TEXT("set_pin_default_value"), TEXT("Set the default value for an input pin."));
 	AddTool(TEXT("reset_pin_default_value"), TEXT("Reset an input pin default value to class defaults."));
+	AddTool(TEXT("set_material_output"), TEXT("Connect a node output to a material output property."));
+	AddTool(TEXT("clear_material_output"), TEXT("Clear a material output property connection."));
+	AddTool(TEXT("list_connected_outputs"), TEXT("List material output properties and current graph connections."));
+	AddTool(TEXT("set_custom_uv_output"), TEXT("Connect a node output to a custom UV channel."));
+	AddTool(TEXT("set_pixel_depth_offset_output"), TEXT("Connect a node output to the pixel depth offset output."));
 	AddTool(TEXT("capabilities"), TEXT("Report baseline material service capabilities and module availability."));
 	return Tools;
 }
@@ -912,6 +1110,11 @@ FMCPResponse FMaterialService::HandleRequest(const FMCPRequest& Request, const F
 	if (MethodName == TEXT("break_all_node_links")) return HandleBreakAllNodeLinks(Request);
 	if (MethodName == TEXT("set_pin_default_value")) return HandleSetPinDefaultValue(Request);
 	if (MethodName == TEXT("reset_pin_default_value")) return HandleResetPinDefaultValue(Request);
+	if (MethodName == TEXT("set_material_output")) return HandleSetMaterialOutput(Request);
+	if (MethodName == TEXT("clear_material_output")) return HandleClearMaterialOutput(Request);
+	if (MethodName == TEXT("list_connected_outputs")) return HandleListConnectedOutputs(Request);
+	if (MethodName == TEXT("set_custom_uv_output")) return HandleSetCustomUVOutput(Request);
+	if (MethodName == TEXT("set_pixel_depth_offset_output")) return HandleSetPixelDepthOffsetOutput(Request);
 	if (MethodName == TEXT("capabilities")) return HandleCapabilities(Request);
 	return MethodNotFound(Request.Id, TEXT("material"), MethodName);
 }
@@ -2748,6 +2951,479 @@ FMCPResponse FMaterialService::HandleResetPinDefaultValue(const FMCPRequest& Req
 	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
 }
 
+FMCPResponse FMaterialService::HandleSetMaterialOutput(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString OutputName;
+	FString FromNodeId;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("output_name"), OutputName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'output_name'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("from_node_id"), FromNodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'from_node_id'"));
+	}
+
+	FString FromOutputPinName;
+	Request.Params->TryGetStringField(TEXT("from_output_pin"), FromOutputPinName);
+
+	bool bHasFromOutputIndex = false;
+	int32 FromOutputIndex = 0;
+	double NumericField = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("from_output_index"), NumericField))
+	{
+		bHasFromOutputIndex = true;
+		FromOutputIndex = static_cast<int32>(NumericField);
+	}
+
+	bool bHasCustomUVIndex = false;
+	int32 CustomUVIndex = 0;
+	if (Request.Params->TryGetNumberField(TEXT("uv_index"), NumericField))
+	{
+		bHasCustomUVIndex = true;
+		CustomUVIndex = static_cast<int32>(NumericField);
+	}
+
+	auto Task = [AssetPath, OutputName, FromNodeId, FromOutputPinName, bHasFromOutputIndex, FromOutputIndex, bHasCustomUVIndex, CustomUVIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/set_material_output only supports UMaterial assets"));
+		}
+
+		EMaterialProperty OutputProperty = MP_MAX;
+		FString ResolvedOutputName;
+		if (!ParseMaterialOutputProperty(OutputName, bHasCustomUVIndex, CustomUVIndex, OutputProperty, ResolvedOutputName, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialExpression* FromNode = FindNodeById(Context, FromNodeId);
+		if (!FromNode)
+		{
+			return MakeFailure(FString::Printf(TEXT("Source node not found: %s"), *FromNodeId));
+		}
+		if (FromNode->IsA<UMaterialExpressionComment>())
+		{
+			return MakeFailure(TEXT("Comment nodes cannot drive material outputs"));
+		}
+
+		int32 ResolvedFromOutputIndex = INDEX_NONE;
+		if (!TryResolveOutputPinIndex(FromNode, FromOutputPinName, bHasFromOutputIndex, FromOutputIndex, ResolvedFromOutputIndex, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		FExpressionInput* PropertyInput = Context.Material->GetExpressionInputForProperty(OutputProperty);
+		if (!PropertyInput)
+		{
+			return MakeFailure(FString::Printf(TEXT("Material output is unavailable for this property: %s"), *ResolvedOutputName));
+		}
+
+		FromNode->Modify();
+		Context.Material->Modify();
+		FromNode->ConnectExpression(PropertyInput, ResolvedFromOutputIndex);
+		Context.MarkDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("output_name"), ResolvedOutputName);
+		Result->SetNumberField(TEXT("output_property"), static_cast<int32>(OutputProperty));
+		Result->SetBoolField(TEXT("output_supported"), Context.Material->IsPropertySupported(OutputProperty));
+		Result->SetBoolField(TEXT("output_active_in_editor"), Context.Material->IsPropertyActiveInEditor(OutputProperty));
+		Result->SetStringField(TEXT("from_node_id"), GetNodeId(FromNode));
+		Result->SetStringField(TEXT("from_node_name"), FromNode->GetName());
+		Result->SetNumberField(TEXT("from_output_index"), ResolvedFromOutputIndex);
+		Result->SetStringField(TEXT("from_output_name"), GetOutputPinDisplayName(FromNode, ResolvedFromOutputIndex, FromNode->GetOutput(ResolvedFromOutputIndex)));
+
+		int32 ResolvedCustomUVIndex = INDEX_NONE;
+		if (TryGetCustomUVIndex(OutputProperty, ResolvedCustomUVIndex))
+		{
+			Result->SetNumberField(TEXT("uv_index"), ResolvedCustomUVIndex);
+		}
+
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleClearMaterialOutput(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString OutputName;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("output_name"), OutputName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'output_name'"));
+	}
+
+	bool bHasCustomUVIndex = false;
+	int32 CustomUVIndex = 0;
+	double NumericField = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("uv_index"), NumericField))
+	{
+		bHasCustomUVIndex = true;
+		CustomUVIndex = static_cast<int32>(NumericField);
+	}
+
+	auto Task = [AssetPath, OutputName, bHasCustomUVIndex, CustomUVIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/clear_material_output only supports UMaterial assets"));
+		}
+
+		EMaterialProperty OutputProperty = MP_MAX;
+		FString ResolvedOutputName;
+		if (!ParseMaterialOutputProperty(OutputName, bHasCustomUVIndex, CustomUVIndex, OutputProperty, ResolvedOutputName, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		FExpressionInput* PropertyInput = Context.Material->GetExpressionInputForProperty(OutputProperty);
+		if (!PropertyInput)
+		{
+			return MakeFailure(FString::Printf(TEXT("Material output is unavailable for this property: %s"), *ResolvedOutputName));
+		}
+
+		const bool bWasConnected = PropertyInput->Expression != nullptr;
+		const FString PreviousNodeId = bWasConnected ? GetNodeId(PropertyInput->Expression) : FString();
+		const int32 PreviousOutputIndex = bWasConnected ? PropertyInput->OutputIndex : INDEX_NONE;
+
+		Context.Material->Modify();
+		PropertyInput->Expression = nullptr;
+		PropertyInput->OutputIndex = 0;
+		PropertyInput->SetMask(0, 0, 0, 0, 0);
+
+		if (bWasConnected)
+		{
+			Context.MarkDirty();
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("output_name"), ResolvedOutputName);
+		Result->SetNumberField(TEXT("output_property"), static_cast<int32>(OutputProperty));
+		Result->SetBoolField(TEXT("changed"), bWasConnected);
+		Result->SetBoolField(TEXT("was_connected"), bWasConnected);
+		Result->SetStringField(TEXT("previous_node_id"), PreviousNodeId);
+		if (bWasConnected)
+		{
+			Result->SetNumberField(TEXT("previous_output_index"), PreviousOutputIndex);
+		}
+
+		int32 ResolvedCustomUVIndex = INDEX_NONE;
+		if (TryGetCustomUVIndex(OutputProperty, ResolvedCustomUVIndex))
+		{
+			Result->SetNumberField(TEXT("uv_index"), ResolvedCustomUVIndex);
+		}
+
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleListConnectedOutputs(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	bool bIncludeInactive = true;
+	Request.Params->TryGetBoolField(TEXT("include_inactive"), bIncludeInactive);
+
+	auto Task = [AssetPath, bIncludeInactive]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/list_connected_outputs only supports UMaterial assets"));
+		}
+
+		TArray<EMaterialProperty> OutputProperties;
+		AddPhase4MaterialOutputProperties(OutputProperties);
+
+		TArray<TSharedPtr<FJsonValue>> Outputs;
+		int32 ConnectedCount = 0;
+
+		for (const EMaterialProperty OutputProperty : OutputProperties)
+		{
+			const bool bSupported = Context.Material->IsPropertySupported(OutputProperty);
+			const bool bActiveInEditor = Context.Material->IsPropertyActiveInEditor(OutputProperty);
+			FExpressionInput* PropertyInput = Context.Material->GetExpressionInputForProperty(OutputProperty);
+			const bool bConnected = PropertyInput && PropertyInput->Expression != nullptr;
+
+			if (!bIncludeInactive && !bConnected && !bActiveInEditor)
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> OutputObj = MakeShared<FJsonObject>();
+			OutputObj->SetStringField(TEXT("output_name"), MaterialPropertyToOutputName(OutputProperty));
+			OutputObj->SetNumberField(TEXT("output_property"), static_cast<int32>(OutputProperty));
+			OutputObj->SetBoolField(TEXT("output_supported"), bSupported);
+			OutputObj->SetBoolField(TEXT("output_active_in_editor"), bActiveInEditor);
+			OutputObj->SetBoolField(TEXT("output_available"), PropertyInput != nullptr);
+			OutputObj->SetBoolField(TEXT("connected"), bConnected);
+
+			int32 CustomUVIndex = INDEX_NONE;
+			if (TryGetCustomUVIndex(OutputProperty, CustomUVIndex))
+			{
+				OutputObj->SetNumberField(TEXT("uv_index"), CustomUVIndex);
+			}
+
+			if (bConnected)
+			{
+				++ConnectedCount;
+				UMaterialExpression* SourceNode = PropertyInput->Expression;
+				OutputObj->SetStringField(TEXT("from_node_id"), GetNodeId(SourceNode));
+				OutputObj->SetStringField(TEXT("from_node_name"), SourceNode->GetName());
+				OutputObj->SetStringField(TEXT("from_node_class"), SourceNode->GetClass()->GetName());
+				OutputObj->SetNumberField(TEXT("from_output_index"), PropertyInput->OutputIndex);
+				OutputObj->SetStringField(TEXT("from_output_name"), GetOutputPinDisplayName(SourceNode, PropertyInput->OutputIndex, SourceNode->GetOutput(PropertyInput->OutputIndex)));
+			}
+
+			Outputs.Add(MakeShared<FJsonValueObject>(OutputObj));
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetArrayField(TEXT("outputs"), Outputs);
+		Result->SetNumberField(TEXT("output_count"), Outputs.Num());
+		Result->SetNumberField(TEXT("connected_count"), ConnectedCount);
+		Result->SetBoolField(TEXT("include_inactive"), bIncludeInactive);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleSetCustomUVOutput(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString FromNodeId;
+	double UVIndexNumeric = 0.0;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("from_node_id"), FromNodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'from_node_id'"));
+	}
+	if (!Request.Params->TryGetNumberField(TEXT("uv_index"), UVIndexNumeric))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'uv_index'"));
+	}
+	const int32 UVIndex = static_cast<int32>(UVIndexNumeric);
+	if (UVIndex < 0 || UVIndex > 7)
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'uv_index' must be in range [0, 7]"));
+	}
+
+	FString FromOutputPinName;
+	Request.Params->TryGetStringField(TEXT("from_output_pin"), FromOutputPinName);
+	bool bHasFromOutputIndex = false;
+	int32 FromOutputIndex = 0;
+	double NumericField = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("from_output_index"), NumericField))
+	{
+		bHasFromOutputIndex = true;
+		FromOutputIndex = static_cast<int32>(NumericField);
+	}
+
+	auto Task = [AssetPath, FromNodeId, UVIndex, FromOutputPinName, bHasFromOutputIndex, FromOutputIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/set_custom_uv_output only supports UMaterial assets"));
+		}
+
+		UMaterialExpression* FromNode = FindNodeById(Context, FromNodeId);
+		if (!FromNode)
+		{
+			return MakeFailure(FString::Printf(TEXT("Source node not found: %s"), *FromNodeId));
+		}
+		if (FromNode->IsA<UMaterialExpressionComment>())
+		{
+			return MakeFailure(TEXT("Comment nodes cannot drive material outputs"));
+		}
+
+		int32 ResolvedFromOutputIndex = INDEX_NONE;
+		if (!TryResolveOutputPinIndex(FromNode, FromOutputPinName, bHasFromOutputIndex, FromOutputIndex, ResolvedFromOutputIndex, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		const EMaterialProperty OutputProperty = static_cast<EMaterialProperty>(static_cast<int32>(MP_CustomizedUVs0) + UVIndex);
+		FExpressionInput* PropertyInput = Context.Material->GetExpressionInputForProperty(OutputProperty);
+		if (!PropertyInput)
+		{
+			return MakeFailure(FString::Printf(TEXT("Material output is unavailable for custom UV %d"), UVIndex));
+		}
+
+		FromNode->Modify();
+		Context.Material->Modify();
+		FromNode->ConnectExpression(PropertyInput, ResolvedFromOutputIndex);
+		Context.MarkDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("output_name"), MaterialPropertyToOutputName(OutputProperty));
+		Result->SetNumberField(TEXT("output_property"), static_cast<int32>(OutputProperty));
+		Result->SetNumberField(TEXT("uv_index"), UVIndex);
+		Result->SetStringField(TEXT("from_node_id"), GetNodeId(FromNode));
+		Result->SetNumberField(TEXT("from_output_index"), ResolvedFromOutputIndex);
+		Result->SetStringField(TEXT("from_output_name"), GetOutputPinDisplayName(FromNode, ResolvedFromOutputIndex, FromNode->GetOutput(ResolvedFromOutputIndex)));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleSetPixelDepthOffsetOutput(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString FromNodeId;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("from_node_id"), FromNodeId))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'from_node_id'"));
+	}
+
+	FString FromOutputPinName;
+	Request.Params->TryGetStringField(TEXT("from_output_pin"), FromOutputPinName);
+	bool bHasFromOutputIndex = false;
+	int32 FromOutputIndex = 0;
+	double NumericField = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("from_output_index"), NumericField))
+	{
+		bHasFromOutputIndex = true;
+		FromOutputIndex = static_cast<int32>(NumericField);
+	}
+
+	auto Task = [AssetPath, FromNodeId, FromOutputPinName, bHasFromOutputIndex, FromOutputIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/set_pixel_depth_offset_output only supports UMaterial assets"));
+		}
+
+		UMaterialExpression* FromNode = FindNodeById(Context, FromNodeId);
+		if (!FromNode)
+		{
+			return MakeFailure(FString::Printf(TEXT("Source node not found: %s"), *FromNodeId));
+		}
+		if (FromNode->IsA<UMaterialExpressionComment>())
+		{
+			return MakeFailure(TEXT("Comment nodes cannot drive material outputs"));
+		}
+
+		int32 ResolvedFromOutputIndex = INDEX_NONE;
+		if (!TryResolveOutputPinIndex(FromNode, FromOutputPinName, bHasFromOutputIndex, FromOutputIndex, ResolvedFromOutputIndex, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		const EMaterialProperty OutputProperty = MP_PixelDepthOffset;
+		FExpressionInput* PropertyInput = Context.Material->GetExpressionInputForProperty(OutputProperty);
+		if (!PropertyInput)
+		{
+			return MakeFailure(TEXT("Material output is unavailable for pixel_depth_offset"));
+		}
+
+		FromNode->Modify();
+		Context.Material->Modify();
+		FromNode->ConnectExpression(PropertyInput, ResolvedFromOutputIndex);
+		Context.MarkDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("output_name"), MaterialPropertyToOutputName(OutputProperty));
+		Result->SetNumberField(TEXT("output_property"), static_cast<int32>(OutputProperty));
+		Result->SetStringField(TEXT("from_node_id"), GetNodeId(FromNode));
+		Result->SetNumberField(TEXT("from_output_index"), ResolvedFromOutputIndex);
+		Result->SetStringField(TEXT("from_output_name"), GetOutputPinDisplayName(FromNode, ResolvedFromOutputIndex, FromNode->GetOutput(ResolvedFromOutputIndex)));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
 FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 {
 	auto Task = []() -> TSharedPtr<FJsonObject>
@@ -2766,6 +3442,7 @@ FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 		PhasesObj->SetBoolField(TEXT("phase_1_asset_class_lifecycle"), true);
 		PhasesObj->SetBoolField(TEXT("phase_2_graph_management"), true);
 		PhasesObj->SetBoolField(TEXT("phase_3_pin_wiring_operations"), true);
+		PhasesObj->SetBoolField(TEXT("phase_4_material_output_authoring"), true);
 		Result->SetObjectField(TEXT("phases"), PhasesObj);
 
 		TSharedPtr<FJsonObject> DependenciesObj = MakeShared<FJsonObject>();

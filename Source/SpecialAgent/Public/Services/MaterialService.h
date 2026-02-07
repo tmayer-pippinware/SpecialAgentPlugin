@@ -47,5 +47,10 @@ private:
 	FMCPResponse HandleBreakAllNodeLinks(const FMCPRequest& Request);
 	FMCPResponse HandleSetPinDefaultValue(const FMCPRequest& Request);
 	FMCPResponse HandleResetPinDefaultValue(const FMCPRequest& Request);
+	FMCPResponse HandleSetMaterialOutput(const FMCPRequest& Request);
+	FMCPResponse HandleClearMaterialOutput(const FMCPRequest& Request);
+	FMCPResponse HandleListConnectedOutputs(const FMCPRequest& Request);
+	FMCPResponse HandleSetCustomUVOutput(const FMCPRequest& Request);
+	FMCPResponse HandleSetPixelDepthOffsetOutput(const FMCPRequest& Request);
 	FMCPResponse HandleCapabilities(const FMCPRequest& Request);
 };
