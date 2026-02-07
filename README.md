@@ -153,6 +153,90 @@ Native Blueprint graph tools for node-based authoring workflows:
 - `blueprint/dry_run_validate`
 - `blueprint/capabilities`
 
+#### Material Authoring
+
+Native material graph tools for asset lifecycle, graph wiring, diagnostics, and safety workflows:
+
+- `material/create_material`
+- `material/create_material_instance`
+- `material/create_material_function`
+- `material/create_parameter_collection`
+- `material/duplicate_asset`
+- `material/rename_asset`
+- `material/delete_asset`
+- `material/save_asset`
+- `material/get_material_info`
+- `material/set_material_settings`
+- `material/list_nodes`
+- `material/add_expression_by_class`
+- `material/delete_node`
+- `material/duplicate_node`
+- `material/move_node`
+- `material/add_comment_node`
+- `material/add_reroute_node`
+- `material/layout_graph`
+- `material/list_node_pins`
+- `material/connect_pins`
+- `material/disconnect_pins`
+- `material/break_pin_links`
+- `material/break_all_node_links`
+- `material/set_pin_default_value`
+- `material/reset_pin_default_value`
+- `material/set_material_output`
+- `material/clear_material_output`
+- `material/list_connected_outputs`
+- `material/set_custom_uv_output`
+- `material/set_pixel_depth_offset_output`
+- `material/list_parameters`
+- `material/add_parameter`
+- `material/remove_parameter`
+- `material/rename_parameter`
+- `material/set_parameter_default`
+- `material/set_parameter_metadata`
+- `material/set_parameter_channel_names`
+- `material/material_instance/set_parent`
+- `material/material_instance/list_overrides`
+- `material/material_instance/clear_override`
+- `material/material_instance/set_scalar`
+- `material/material_instance/set_vector`
+- `material/material_instance/set_texture`
+- `material/material_instance/set_static_switch`
+- `material/material_instance/set_static_component_mask`
+- `material/material_instance/copy_overrides_from_instance`
+- `material/material_function/get_info`
+- `material/material_function/list_inputs`
+- `material/material_function/list_outputs`
+- `material/material_function/create_input`
+- `material/material_function/create_output`
+- `material/material_function/remove_input`
+- `material/material_function/remove_output`
+- `material/material_function/add_call_node`
+- `material/material_function/set_io_types`
+- `material/material_function/compile`
+- `material/material_collection/get_info`
+- `material/material_collection/list_parameters`
+- `material/material_collection/add_scalar`
+- `material/material_collection/add_vector`
+- `material/material_collection/remove_parameter`
+- `material/material_collection/rename_parameter`
+- `material/material_collection/set_default_value`
+- `material/find_references`
+- `material/rename_symbol`
+- `material/replace_function_calls`
+- `material/remove_unused_parameters`
+- `material/remove_orphan_nodes`
+- `material/compile_material`
+- `material/get_compile_result`
+- `material/validate_material`
+- `material/get_material_status`
+- `material/list_material_warnings`
+- `material/get_shader_stats`
+- `material/begin_transaction`
+- `material/end_transaction`
+- `material/cancel_transaction`
+- `material/dry_run_validate`
+- `material/capabilities`
+
 ### Visual Feedback Loop
 
 Capture viewport screenshots and return them to vision-enabled LLMs. Your AI assistant can see what it built, evaluate the results, and refine its approach.
@@ -238,6 +322,7 @@ Your AI assistant now has access to:
 |---------|:-------:|-------------|
 | **Python** | 3 | Execute scripts, run files, list modules |
 | **Blueprint** | 98 | Blueprint asset lifecycle, graph management, variable authoring, component SCS authoring, function/macro/dispatcher authoring, node authoring, pin operations, refactor/symbol operations, compile/diagnostics/validation, interfaces/inheritance, transaction safety, and type coverage |
+| **Material** | 80+ | Material asset lifecycle, graph editing, parameter authoring, instances/functions/collections, refactor operations, diagnostics, transactions, and type coverage |
 | **Screenshot** | 2 | Capture viewport for AI vision |
 | **World** | 30+ | Actor manipulation and spatial queries |
 | **Assets** | 4 | Content Browser search and inspection |

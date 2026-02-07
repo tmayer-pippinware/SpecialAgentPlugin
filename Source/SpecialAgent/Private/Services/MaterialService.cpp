@@ -4,6 +4,8 @@
 
 #include "AssetToolsModule.h"
 #include "EditorAssetLibrary.h"
+#include "Editor.h"
+#include "Editor/Transactor.h"
 #include "Factories/MaterialFactoryNew.h"
 #include "Factories/MaterialFunctionFactoryNew.h"
 #include "Factories/MaterialInstanceConstantFactoryNew.h"
@@ -11,6 +13,7 @@
 #include "GameThreadDispatcher.h"
 #include "MaterialEditingLibrary.h"
 #include "MaterialDomain.h"
+#include "MaterialShared.h"
 #include "Materials/MaterialExpressionFontSampleParameter.h"
 #include "Materials/MaterialExpressionParameter.h"
 #include "Materials/Material.h"
@@ -27,12 +30,14 @@
 #include "Materials/MaterialExpressionTextureSampleParameter2D.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialFunction.h"
+#include "Materials/MaterialFunctionInterface.h"
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialParameterCollection.h"
 #include "Engine/Font.h"
 #include "Engine/Texture.h"
+#include "Misc/DataValidation.h"
 #include "Misc/DefaultValueHelper.h"
 #include "Misc/EngineVersion.h"
 #include "Misc/PackageName.h"
@@ -2607,6 +2612,253 @@ namespace
 		}
 	}
 
+	enum class EMaterialSymbolType : uint8
+	{
+		Unknown,
+		Parameter,
+		FunctionCall,
+		Node
+	};
+
+	static FString MaterialSymbolTypeToString(const EMaterialSymbolType Type)
+	{
+		switch (Type)
+		{
+		case EMaterialSymbolType::Parameter:
+			return TEXT("parameter");
+		case EMaterialSymbolType::FunctionCall:
+			return TEXT("function_call");
+		case EMaterialSymbolType::Node:
+			return TEXT("node");
+		default:
+			return TEXT("unknown");
+		}
+	}
+
+	static bool ParseMaterialSymbolType(const FString& SymbolTypeString, EMaterialSymbolType& OutType)
+	{
+		const FString Normalized = NormalizeParameterToken(SymbolTypeString);
+		if (Normalized == TEXT("parameter") || Normalized == TEXT("param"))
+		{
+			OutType = EMaterialSymbolType::Parameter;
+			return true;
+		}
+		if (Normalized == TEXT("function_call") || Normalized == TEXT("functioncall") || Normalized == TEXT("function"))
+		{
+			OutType = EMaterialSymbolType::FunctionCall;
+			return true;
+		}
+		if (Normalized == TEXT("node"))
+		{
+			OutType = EMaterialSymbolType::Node;
+			return true;
+		}
+
+		OutType = EMaterialSymbolType::Unknown;
+		return false;
+	}
+
+	static FString MaterialMessageSeverityToString(const EMessageSeverity::Type Severity)
+	{
+		switch (Severity)
+		{
+		case EMessageSeverity::Error:
+			return TEXT("error");
+		case EMessageSeverity::Warning:
+			return TEXT("warning");
+		case EMessageSeverity::PerformanceWarning:
+			return TEXT("performance_warning");
+		case EMessageSeverity::Info:
+			return TEXT("info");
+		default:
+			return TEXT("unknown");
+		}
+	}
+
+	static FString MaterialDataValidationResultToString(const EDataValidationResult Result)
+	{
+		switch (Result)
+		{
+		case EDataValidationResult::Valid:
+			return TEXT("valid");
+		case EDataValidationResult::Invalid:
+			return TEXT("invalid");
+		case EDataValidationResult::NotValidated:
+			return TEXT("not_validated");
+		default:
+			return TEXT("not_validated");
+		}
+	}
+
+	struct FMaterialCompileDiagnostics
+	{
+		bool bIsCompiling = false;
+		bool bHadCompileError = false;
+		TArray<FString> CompileErrors;
+		TArray<TWeakObjectPtr<UMaterialExpression>> ErrorExpressions;
+
+		void Reset()
+		{
+			bIsCompiling = false;
+			bHadCompileError = false;
+			CompileErrors.Reset();
+			ErrorExpressions.Reset();
+		}
+	};
+
+	static void GatherMaterialCompileDiagnostics(UMaterial* Material, FMaterialCompileDiagnostics& OutDiagnostics)
+	{
+		OutDiagnostics.Reset();
+		if (!Material)
+		{
+			return;
+		}
+
+		OutDiagnostics.bIsCompiling = Material->IsCompiling();
+
+		TSet<FString> SeenErrors;
+		TSet<const UMaterialExpression*> SeenErrorExpressions;
+
+		const ERHIFeatureLevel::Type FeatureLevels[] =
+		{
+			ERHIFeatureLevel::SM6,
+			ERHIFeatureLevel::SM5,
+			ERHIFeatureLevel::ES3_1
+		};
+
+		for (const ERHIFeatureLevel::Type FeatureLevel : FeatureLevels)
+		{
+			OutDiagnostics.bHadCompileError = OutDiagnostics.bHadCompileError || Material->IsCompilingOrHadCompileError(FeatureLevel);
+
+			const FMaterialResource* MaterialResource = Material->GetMaterialResource(FeatureLevel);
+			if (!MaterialResource)
+			{
+				continue;
+			}
+
+			for (const FString& CompileError : MaterialResource->GetCompileErrors())
+			{
+				const FString TrimmedError = CompileError.TrimStartAndEnd();
+				if (!TrimmedError.IsEmpty() && !SeenErrors.Contains(TrimmedError))
+				{
+					SeenErrors.Add(TrimmedError);
+					OutDiagnostics.CompileErrors.Add(TrimmedError);
+				}
+			}
+
+			for (UMaterialExpression* ErrorExpression : MaterialResource->GetErrorExpressions())
+			{
+				if (!ErrorExpression || SeenErrorExpressions.Contains(ErrorExpression))
+				{
+					continue;
+				}
+				SeenErrorExpressions.Add(ErrorExpression);
+				OutDiagnostics.ErrorExpressions.Add(ErrorExpression);
+			}
+		}
+
+		OutDiagnostics.bHadCompileError = OutDiagnostics.bHadCompileError || OutDiagnostics.CompileErrors.Num() > 0;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> BuildMaterialCompileMessagesJson(const FMaterialCompileDiagnostics& Diagnostics, int32 MaxMessages = INDEX_NONE)
+	{
+		const int32 MessageLimit = MaxMessages >= 0
+			? FMath::Min(MaxMessages, Diagnostics.CompileErrors.Num())
+			: Diagnostics.CompileErrors.Num();
+
+		TArray<TSharedPtr<FJsonValue>> MessagesJson;
+		MessagesJson.Reserve(MessageLimit);
+
+		for (int32 MessageIndex = 0; MessageIndex < MessageLimit; ++MessageIndex)
+		{
+			TSharedPtr<FJsonObject> MessageObj = MakeShared<FJsonObject>();
+			MessageObj->SetStringField(TEXT("severity"), TEXT("error"));
+			MessageObj->SetNumberField(TEXT("severity_code"), static_cast<int32>(EMessageSeverity::Error));
+			MessageObj->SetStringField(TEXT("text"), Diagnostics.CompileErrors[MessageIndex]);
+
+			const UMaterialExpression* ErrorExpression = Diagnostics.ErrorExpressions.IsValidIndex(MessageIndex)
+				? Diagnostics.ErrorExpressions[MessageIndex].Get()
+				: nullptr;
+			MessageObj->SetBoolField(TEXT("has_node_context"), ErrorExpression != nullptr);
+			if (ErrorExpression)
+			{
+				MessageObj->SetObjectField(TEXT("node"), BuildNodeJson(ErrorExpression));
+			}
+
+			MessagesJson.Add(MakeShared<FJsonValueObject>(MessageObj));
+		}
+
+		return MessagesJson;
+	}
+
+	static TSharedPtr<FJsonObject> BuildMaterialValidationIssueJson(const FDataValidationContext::FIssue& Issue)
+	{
+		TSharedPtr<FJsonObject> IssueObj = MakeShared<FJsonObject>();
+		IssueObj->SetStringField(TEXT("severity"), MaterialMessageSeverityToString(Issue.Severity));
+		IssueObj->SetNumberField(TEXT("severity_code"), static_cast<int32>(Issue.Severity));
+		IssueObj->SetStringField(TEXT("text"), Issue.Message.ToString());
+		return IssueObj;
+	}
+
+	static UObject* ResolveMaterialManagedAsset(
+		const FString& InputPath,
+		FString& OutAssetPath,
+		FString& OutAssetKind,
+		FString& OutError)
+	{
+		OutAssetPath = NormalizeAssetPath(InputPath);
+		OutAssetKind.Reset();
+		if (!FPackageName::IsValidLongPackageName(OutAssetPath))
+		{
+			OutError = FString::Printf(TEXT("Invalid asset path: %s"), *InputPath);
+			return nullptr;
+		}
+
+		if (UMaterial* Material = LoadAssetAs<UMaterial>(OutAssetPath))
+		{
+			OutAssetKind = TEXT("material");
+			return Material;
+		}
+		if (UMaterialFunction* Function = LoadAssetAs<UMaterialFunction>(OutAssetPath))
+		{
+			OutAssetKind = TEXT("material_function");
+			return Function;
+		}
+		if (UMaterialInstanceConstant* Instance = LoadAssetAs<UMaterialInstanceConstant>(OutAssetPath))
+		{
+			OutAssetKind = TEXT("material_instance");
+			return Instance;
+		}
+		if (UMaterialParameterCollection* Collection = LoadAssetAs<UMaterialParameterCollection>(OutAssetPath))
+		{
+			OutAssetKind = TEXT("material_parameter_collection");
+			return Collection;
+		}
+
+		OutError = FString::Printf(TEXT("Material asset not found or unsupported asset type: %s"), *OutAssetPath);
+		return nullptr;
+	}
+
+	static UMaterialInterface* ResolveMaterialInterfaceAsset(
+		const FString& InputPath,
+		FString& OutAssetPath,
+		FString& OutError)
+	{
+		OutAssetPath = NormalizeAssetPath(InputPath);
+		if (!FPackageName::IsValidLongPackageName(OutAssetPath))
+		{
+			OutError = FString::Printf(TEXT("Invalid asset path: %s"), *InputPath);
+			return nullptr;
+		}
+
+		UMaterialInterface* MaterialInterface = LoadAssetAs<UMaterialInterface>(OutAssetPath);
+		if (!MaterialInterface)
+		{
+			OutError = FString::Printf(TEXT("Material or material instance not found: %s"), *OutAssetPath);
+		}
+		return MaterialInterface;
+	}
+
 	static void WriteMaterialSettings(const UMaterial* Material, const TSharedPtr<FJsonObject>& Result)
 	{
 		Result->SetStringField(TEXT("domain"), DomainToString(Material->MaterialDomain));
@@ -2720,6 +2972,21 @@ TArray<FMCPToolInfo> FMaterialService::GetAvailableTools() const
 	AddTool(TEXT("material_collection/remove_parameter"), TEXT("Remove a scalar or vector parameter from a material parameter collection."));
 	AddTool(TEXT("material_collection/rename_parameter"), TEXT("Rename a scalar or vector parameter in a material parameter collection."));
 	AddTool(TEXT("material_collection/set_default_value"), TEXT("Set a scalar or vector default value in a material parameter collection."));
+	AddTool(TEXT("find_references"), TEXT("Find references for a material symbol (parameter, function call, or node)."));
+	AddTool(TEXT("rename_symbol"), TEXT("Rename a material symbol safely (parameter, function call, or node)."));
+	AddTool(TEXT("replace_function_calls"), TEXT("Replace material function call nodes across a graph."));
+	AddTool(TEXT("remove_unused_parameters"), TEXT("Remove unreferenced parameter expressions from a material graph."));
+	AddTool(TEXT("remove_orphan_nodes"), TEXT("Remove orphaned nodes that do not contribute to final outputs."));
+	AddTool(TEXT("compile_material"), TEXT("Compile/recompile a material and return diagnostics."));
+	AddTool(TEXT("get_compile_result"), TEXT("Get compile diagnostics for a material, with optional compile."));
+	AddTool(TEXT("validate_material"), TEXT("Run data validation checks for a material-related asset."));
+	AddTool(TEXT("get_material_status"), TEXT("Get compile/dirty/validation status for a material-related asset."));
+	AddTool(TEXT("list_material_warnings"), TEXT("List warning-level diagnostics for a material-related asset."));
+	AddTool(TEXT("get_shader_stats"), TEXT("Get shader instruction and sampler stats for a material or material instance."));
+	AddTool(TEXT("begin_transaction"), TEXT("Begin a managed editor transaction for material authoring operations."));
+	AddTool(TEXT("end_transaction"), TEXT("End an active managed material transaction."));
+	AddTool(TEXT("cancel_transaction"), TEXT("Cancel and rollback an active managed material transaction."));
+	AddTool(TEXT("dry_run_validate"), TEXT("Run non-mutating validation checks for a material-related asset."));
 	AddTool(TEXT("capabilities"), TEXT("Report baseline material service capabilities and module availability."));
 	return Tools;
 }
@@ -2789,6 +3056,21 @@ FMCPResponse FMaterialService::HandleRequest(const FMCPRequest& Request, const F
 	if (MethodName == TEXT("material_collection/remove_parameter")) return HandleMaterialCollectionRemoveParameter(Request);
 	if (MethodName == TEXT("material_collection/rename_parameter")) return HandleMaterialCollectionRenameParameter(Request);
 	if (MethodName == TEXT("material_collection/set_default_value")) return HandleMaterialCollectionSetDefaultValue(Request);
+	if (MethodName == TEXT("find_references")) return HandleFindReferences(Request);
+	if (MethodName == TEXT("rename_symbol")) return HandleRenameSymbol(Request);
+	if (MethodName == TEXT("replace_function_calls")) return HandleReplaceFunctionCalls(Request);
+	if (MethodName == TEXT("remove_unused_parameters")) return HandleRemoveUnusedParameters(Request);
+	if (MethodName == TEXT("remove_orphan_nodes")) return HandleRemoveOrphanNodes(Request);
+	if (MethodName == TEXT("compile_material")) return HandleCompileMaterial(Request);
+	if (MethodName == TEXT("get_compile_result")) return HandleGetCompileResult(Request);
+	if (MethodName == TEXT("validate_material")) return HandleValidateMaterial(Request);
+	if (MethodName == TEXT("get_material_status")) return HandleGetMaterialStatus(Request);
+	if (MethodName == TEXT("list_material_warnings")) return HandleListMaterialWarnings(Request);
+	if (MethodName == TEXT("get_shader_stats")) return HandleGetShaderStats(Request);
+	if (MethodName == TEXT("begin_transaction")) return HandleBeginTransaction(Request);
+	if (MethodName == TEXT("end_transaction")) return HandleEndTransaction(Request);
+	if (MethodName == TEXT("cancel_transaction")) return HandleCancelTransaction(Request);
+	if (MethodName == TEXT("dry_run_validate")) return HandleDryRunValidate(Request);
 	if (MethodName == TEXT("capabilities")) return HandleCapabilities(Request);
 	return MethodNotFound(Request.Id, TEXT("material"), MethodName);
 }
@@ -8711,11 +8993,1847 @@ FMCPResponse FMaterialService::HandleMaterialCollectionSetDefaultValue(const FMC
 	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
 }
 
-FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
+FMCPResponse FMaterialService::HandleFindReferences(const FMCPRequest& Request)
 {
-	auto Task = []() -> TSharedPtr<FJsonObject>
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	FString SymbolTypeString = TEXT("node");
+	Request.Params->TryGetStringField(TEXT("symbol_type"), SymbolTypeString);
+
+	FString SymbolName;
+	Request.Params->TryGetStringField(TEXT("symbol_name"), SymbolName);
+	FString NodeId;
+	Request.Params->TryGetStringField(TEXT("node_id"), NodeId);
+	FString FunctionPath;
+	Request.Params->TryGetStringField(TEXT("function_path"), FunctionPath);
+
+	auto Task = [AssetPath, SymbolTypeString, SymbolName, NodeId, FunctionPath]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		EMaterialSymbolType SymbolType = EMaterialSymbolType::Unknown;
+		if (!ParseMaterialSymbolType(SymbolTypeString, SymbolType))
+		{
+			return MakeFailure(FString::Printf(TEXT("Unsupported symbol_type '%s'. Supported: parameter, function_call, node"), *SymbolTypeString));
+		}
+
+		TArray<UMaterialExpression*> Expressions;
+		TArray<UMaterialExpressionComment*> Comments;
+		GatherGraphNodes(Context, Expressions, Comments);
+
+		TArray<UMaterialExpression*> TargetNodes;
+		if (SymbolType == EMaterialSymbolType::Parameter)
+		{
+			if (!Context.Material)
+			{
+				return MakeFailure(TEXT("symbol_type=parameter is only supported for material assets"));
+			}
+
+			const FString TrimmedNodeId = NodeId.TrimStartAndEnd();
+			const FString TrimmedSymbolName = SymbolName.TrimStartAndEnd();
+			if (!TrimmedNodeId.IsEmpty())
+			{
+				UMaterialExpression* TargetParameter = FindNodeById(Context, TrimmedNodeId);
+				if (!TargetParameter)
+				{
+					return MakeFailure(FString::Printf(TEXT("Node not found: %s"), *TrimmedNodeId));
+				}
+				if (!IsSupportedParameterExpression(TargetParameter))
+				{
+					return MakeFailure(FString::Printf(TEXT("Node is not a supported parameter expression: %s"), *TrimmedNodeId));
+				}
+				TargetNodes.Add(TargetParameter);
+			}
+			else
+			{
+				GatherParameterMatchesByName(Context, TrimmedSymbolName, false, EMaterialParameterNodeType::Unknown, TargetNodes);
+				if (TargetNodes.Num() == 0)
+				{
+					return MakeFailure(FString::Printf(TEXT("Parameter not found: %s"), *TrimmedSymbolName));
+				}
+			}
+		}
+		else if (SymbolType == EMaterialSymbolType::FunctionCall)
+		{
+			const FString TrimmedFunctionPath = NormalizeAssetPath(FunctionPath);
+			const FString TrimmedSymbolName = SymbolName.TrimStartAndEnd();
+			const FString TrimmedNodeId = NodeId.TrimStartAndEnd();
+
+			if (!TrimmedNodeId.IsEmpty())
+			{
+				UMaterialExpression* TargetNode = FindNodeById(Context, TrimmedNodeId);
+				if (!TargetNode)
+				{
+					return MakeFailure(FString::Printf(TEXT("Node not found: %s"), *TrimmedNodeId));
+				}
+				UMaterialExpressionMaterialFunctionCall* FunctionCall = Cast<UMaterialExpressionMaterialFunctionCall>(TargetNode);
+				if (!FunctionCall)
+				{
+					return MakeFailure(FString::Printf(TEXT("Node is not a function call: %s"), *TrimmedNodeId));
+				}
+				TargetNodes.Add(FunctionCall);
+			}
+			else
+			{
+				for (UMaterialExpression* Expression : Expressions)
+				{
+					UMaterialExpressionMaterialFunctionCall* FunctionCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expression);
+					if (!FunctionCall)
+					{
+						continue;
+					}
+
+					if (!TrimmedFunctionPath.IsEmpty())
+					{
+						const FString CurrentFunctionPath = FunctionCall->MaterialFunction
+							? NormalizeAssetPath(FunctionCall->MaterialFunction->GetPathName())
+							: FString();
+						if (!CurrentFunctionPath.Equals(TrimmedFunctionPath, ESearchCase::IgnoreCase))
+						{
+							continue;
+						}
+					}
+
+					if (!TrimmedSymbolName.IsEmpty())
+					{
+						const FString CurrentFunctionName = FunctionCall->MaterialFunction ? FunctionCall->MaterialFunction->GetName() : FString();
+						if (!CurrentFunctionName.Equals(TrimmedSymbolName, ESearchCase::IgnoreCase))
+						{
+							continue;
+						}
+					}
+
+					TargetNodes.Add(FunctionCall);
+				}
+
+				if (TargetNodes.Num() == 0)
+				{
+					return MakeFailure(TEXT("No function call nodes matched the provided filter"));
+				}
+			}
+		}
+		else
+		{
+			const FString TargetNodeId = !NodeId.TrimStartAndEnd().IsEmpty() ? NodeId.TrimStartAndEnd() : SymbolName.TrimStartAndEnd();
+			if (TargetNodeId.IsEmpty())
+			{
+				return MakeFailure(TEXT("symbol_type=node requires node_id (or symbol_name as node id)"));
+			}
+
+			UMaterialExpression* Node = FindNodeById(Context, TargetNodeId);
+			if (!Node)
+			{
+				return MakeFailure(FString::Printf(TEXT("Node not found: %s"), *TargetNodeId));
+			}
+			TargetNodes.Add(Node);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ReferencesJson;
+		TArray<TSharedPtr<FJsonValue>> TargetNodesJson;
+
+		auto AddReferenceObject = [&ReferencesJson](
+			const FString& ReferenceType,
+			UMaterialExpression* SourceNode,
+			const int32 SourceOutputIndex,
+			UMaterialExpression* TargetNode,
+			const int32 TargetInputIndex,
+			const FString& OutputName,
+			const FString& InputName)
+		{
+			TSharedPtr<FJsonObject> RefObj = MakeShared<FJsonObject>();
+			RefObj->SetStringField(TEXT("reference_type"), ReferenceType);
+			RefObj->SetStringField(TEXT("from_node_id"), SourceNode ? GetNodeId(SourceNode) : FString());
+			RefObj->SetStringField(TEXT("from_node_name"), SourceNode ? SourceNode->GetName() : FString());
+			RefObj->SetNumberField(TEXT("from_output_index"), SourceOutputIndex);
+			RefObj->SetStringField(TEXT("from_output_name"), OutputName);
+			RefObj->SetStringField(TEXT("to_node_id"), TargetNode ? GetNodeId(TargetNode) : FString());
+			RefObj->SetStringField(TEXT("to_node_name"), TargetNode ? TargetNode->GetName() : FString());
+			RefObj->SetNumberField(TEXT("to_input_index"), TargetInputIndex);
+			RefObj->SetStringField(TEXT("to_input_name"), InputName);
+			ReferencesJson.Add(MakeShared<FJsonValueObject>(RefObj));
+		};
+
+		for (UMaterialExpression* TargetNode : TargetNodes)
+		{
+			if (!TargetNode)
+			{
+				continue;
+			}
+			TargetNodesJson.Add(MakeShared<FJsonValueObject>(BuildNodeJson(TargetNode)));
+
+			for (int32 InputIndex = 0;; ++InputIndex)
+			{
+				FExpressionInput* Input = TargetNode->GetInput(InputIndex);
+				if (!Input)
+				{
+					break;
+				}
+				if (!Input->Expression)
+				{
+					continue;
+				}
+
+				UMaterialExpression* SourceNode = Input->Expression;
+				const int32 SourceOutputIndex = Input->OutputIndex;
+				const FString OutputName = GetOutputPinDisplayName(SourceNode, SourceOutputIndex, SourceNode->GetOutput(SourceOutputIndex));
+				const FString InputName = GetInputPinDisplayName(TargetNode, InputIndex, Input);
+				AddReferenceObject(TEXT("input_link"), SourceNode, SourceOutputIndex, TargetNode, InputIndex, OutputName, InputName);
+			}
+
+			for (UMaterialExpression* Expression : Expressions)
+			{
+				if (!Expression || Expression == TargetNode)
+				{
+					continue;
+				}
+
+				for (int32 InputIndex = 0;; ++InputIndex)
+				{
+					FExpressionInput* Input = Expression->GetInput(InputIndex);
+					if (!Input)
+					{
+						break;
+					}
+					if (Input->Expression != TargetNode)
+					{
+						continue;
+					}
+
+					const int32 SourceOutputIndex = Input->OutputIndex;
+					const FString OutputName = GetOutputPinDisplayName(TargetNode, SourceOutputIndex, TargetNode->GetOutput(SourceOutputIndex));
+					const FString InputName = GetInputPinDisplayName(Expression, InputIndex, Input);
+					AddReferenceObject(TEXT("output_link"), TargetNode, SourceOutputIndex, Expression, InputIndex, OutputName, InputName);
+				}
+			}
+
+			if (Context.Material)
+			{
+				TArray<EMaterialProperty> OutputProperties;
+				AddPhase4MaterialOutputProperties(OutputProperties);
+				for (const EMaterialProperty OutputProperty : OutputProperties)
+				{
+					FExpressionInput* PropertyInput = Context.Material->GetExpressionInputForProperty(OutputProperty);
+					if (!PropertyInput || PropertyInput->Expression != TargetNode)
+					{
+						continue;
+					}
+
+					TSharedPtr<FJsonObject> OutputRef = MakeShared<FJsonObject>();
+					OutputRef->SetStringField(TEXT("reference_type"), TEXT("material_output"));
+					OutputRef->SetStringField(TEXT("from_node_id"), GetNodeId(TargetNode));
+					OutputRef->SetStringField(TEXT("from_node_name"), TargetNode->GetName());
+					OutputRef->SetNumberField(TEXT("from_output_index"), PropertyInput->OutputIndex);
+					OutputRef->SetStringField(TEXT("from_output_name"), GetOutputPinDisplayName(TargetNode, PropertyInput->OutputIndex, TargetNode->GetOutput(PropertyInput->OutputIndex)));
+					OutputRef->SetStringField(TEXT("output_name"), MaterialPropertyToOutputName(OutputProperty));
+					OutputRef->SetNumberField(TEXT("output_property"), static_cast<int32>(OutputProperty));
+					ReferencesJson.Add(MakeShared<FJsonValueObject>(OutputRef));
+				}
+			}
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("symbol_type"), MaterialSymbolTypeToString(SymbolType));
+		Result->SetArrayField(TEXT("target_nodes"), TargetNodesJson);
+		Result->SetNumberField(TEXT("target_count"), TargetNodesJson.Num());
+		Result->SetArrayField(TEXT("references"), ReferencesJson);
+		Result->SetNumberField(TEXT("count"), ReferencesJson.Num());
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleRenameSymbol(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	FString SymbolTypeString = TEXT("parameter");
+	Request.Params->TryGetStringField(TEXT("symbol_type"), SymbolTypeString);
+	FString NewName;
+	if (!Request.Params->TryGetStringField(TEXT("new_name"), NewName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'new_name'"));
+	}
+	const FString TrimmedNewName = NewName.TrimStartAndEnd();
+	if (TrimmedNewName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'new_name' cannot be empty"));
+	}
+
+	FString OldName;
+	Request.Params->TryGetStringField(TEXT("old_name"), OldName);
+	if (OldName.TrimStartAndEnd().IsEmpty())
+	{
+		Request.Params->TryGetStringField(TEXT("symbol_name"), OldName);
+	}
+	FString NodeId;
+	Request.Params->TryGetStringField(TEXT("node_id"), NodeId);
+
+	bool bRenameAllMatches = false;
+	Request.Params->TryGetBoolField(TEXT("rename_all_matches"), bRenameAllMatches);
+
+	FString NewFunctionPath = TrimmedNewName;
+	Request.Params->TryGetStringField(TEXT("new_function_path"), NewFunctionPath);
+	NewFunctionPath = NewFunctionPath.TrimStartAndEnd();
+
+	auto Task = [AssetPath, SymbolTypeString, TrimmedNewName, OldName, NodeId, bRenameAllMatches, NewFunctionPath]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		EMaterialSymbolType SymbolType = EMaterialSymbolType::Unknown;
+		if (!ParseMaterialSymbolType(SymbolTypeString, SymbolType))
+		{
+			return MakeFailure(FString::Printf(TEXT("Unsupported symbol_type '%s'. Supported: parameter, function_call, node"), *SymbolTypeString));
+		}
+
+		if (SymbolType == EMaterialSymbolType::Parameter)
+		{
+			if (!Context.Material)
+			{
+				return MakeFailure(TEXT("symbol_type=parameter is only supported for material assets"));
+			}
+
+			const FString TrimmedNodeId = NodeId.TrimStartAndEnd();
+			const FString TrimmedOldName = OldName.TrimStartAndEnd();
+
+			TArray<UMaterialExpression*> Targets;
+			if (!TrimmedNodeId.IsEmpty())
+			{
+				UMaterialExpression* TargetExpression = FindNodeById(Context, TrimmedNodeId);
+				if (!TargetExpression)
+				{
+					return MakeFailure(FString::Printf(TEXT("Node not found: %s"), *TrimmedNodeId));
+				}
+				if (!IsSupportedParameterExpression(TargetExpression))
+				{
+					return MakeFailure(FString::Printf(TEXT("Node is not a supported parameter expression: %s"), *TrimmedNodeId));
+				}
+				Targets.Add(TargetExpression);
+			}
+			else
+			{
+				GatherParameterMatchesByName(Context, TrimmedOldName, false, EMaterialParameterNodeType::Unknown, Targets);
+				if (Targets.Num() == 0)
+				{
+					return MakeFailure(FString::Printf(TEXT("Parameter not found: %s"), *TrimmedOldName));
+				}
+				if (Targets.Num() > 1 && !bRenameAllMatches)
+				{
+					return MakeFailure(FString::Printf(TEXT("Parameter name is ambiguous (%d matches). Provide node_id or set rename_all_matches=true."), Targets.Num()));
+				}
+			}
+
+			TArray<UMaterialExpression*> AllParameters;
+			GatherParameterExpressions(Context, AllParameters);
+			TSet<UMaterialExpression*> TargetSet;
+			for (UMaterialExpression* Target : Targets)
+			{
+				if (Target)
+				{
+					TargetSet.Add(Target);
+				}
+			}
+
+			for (UMaterialExpression* Existing : AllParameters)
+			{
+				if (!Existing || TargetSet.Contains(Existing))
+				{
+					continue;
+				}
+				if (GetParameterExpressionName(Existing).ToString().Equals(TrimmedNewName, ESearchCase::IgnoreCase))
+				{
+					return MakeFailure(FString::Printf(TEXT("Parameter name already exists: %s"), *TrimmedNewName));
+				}
+			}
+
+			int32 ChangedCount = 0;
+			TArray<TSharedPtr<FJsonValue>> RenamedJson;
+			for (UMaterialExpression* Target : Targets)
+			{
+				if (!Target)
+				{
+					continue;
+				}
+
+				const FName ExistingName = GetParameterExpressionName(Target);
+				const bool bChanged = !ExistingName.ToString().Equals(TrimmedNewName, ESearchCase::IgnoreCase);
+				if (bChanged)
+				{
+					Target->Modify();
+					if (!SetParameterExpressionName(Target, FName(*TrimmedNewName)))
+					{
+						return MakeFailure(TEXT("Target node does not expose a parameter name"));
+					}
+					++ChangedCount;
+				}
+
+				TSharedPtr<FJsonObject> RenamedObj = MakeShared<FJsonObject>();
+				RenamedObj->SetStringField(TEXT("node_id"), GetNodeId(Target));
+				RenamedObj->SetStringField(TEXT("old_name"), ExistingName.ToString());
+				RenamedObj->SetStringField(TEXT("new_name"), GetParameterExpressionName(Target).ToString());
+				RenamedObj->SetBoolField(TEXT("changed"), bChanged);
+				RenamedObj->SetObjectField(TEXT("parameter"), BuildParameterJson(Target));
+				RenamedJson.Add(MakeShared<FJsonValueObject>(RenamedObj));
+			}
+
+			if (ChangedCount > 0)
+			{
+				Context.MarkDirty();
+			}
+
+			TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+			Result->SetStringField(TEXT("symbol_type"), TEXT("parameter"));
+			Result->SetStringField(TEXT("new_name"), TrimmedNewName);
+			Result->SetBoolField(TEXT("rename_all_matches"), bRenameAllMatches);
+			Result->SetBoolField(TEXT("changed"), ChangedCount > 0);
+			Result->SetNumberField(TEXT("changed_count"), ChangedCount);
+			Result->SetArrayField(TEXT("renamed"), RenamedJson);
+			return Result;
+		}
+
+		if (SymbolType == EMaterialSymbolType::FunctionCall)
+		{
+			const FString ReplacementFunctionPath = NormalizeAssetPath(NewFunctionPath);
+			if (!FPackageName::IsValidLongPackageName(ReplacementFunctionPath))
+			{
+				return MakeFailure(FString::Printf(TEXT("Invalid new_function_path: %s"), *NewFunctionPath));
+			}
+
+			UMaterialFunctionInterface* ReplacementFunction = LoadAssetAs<UMaterialFunctionInterface>(ReplacementFunctionPath);
+			if (!ReplacementFunction)
+			{
+				return MakeFailure(FString::Printf(TEXT("Replacement function not found: %s"), *ReplacementFunctionPath));
+			}
+
+			const FString TrimmedNodeId = NodeId.TrimStartAndEnd();
+			const FString TrimmedOldName = OldName.TrimStartAndEnd();
+
+			TArray<UMaterialExpression*> Expressions;
+			TArray<UMaterialExpressionComment*> Comments;
+			GatherGraphNodes(Context, Expressions, Comments);
+
+			TArray<TSharedPtr<FJsonValue>> UpdatedNodes;
+			int32 ChangedCount = 0;
+			for (UMaterialExpression* Expression : Expressions)
+			{
+				UMaterialExpressionMaterialFunctionCall* FunctionCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expression);
+				if (!FunctionCall)
+				{
+					continue;
+				}
+
+				if (!TrimmedNodeId.IsEmpty() && !GetNodeId(FunctionCall).Equals(TrimmedNodeId, ESearchCase::IgnoreCase))
+				{
+					continue;
+				}
+
+				if (!TrimmedOldName.IsEmpty())
+				{
+					const FString CurrentFunctionPath = FunctionCall->MaterialFunction ? NormalizeAssetPath(FunctionCall->MaterialFunction->GetPathName()) : FString();
+					const FString CurrentFunctionName = FunctionCall->MaterialFunction ? FunctionCall->MaterialFunction->GetName() : FString();
+					if (!CurrentFunctionPath.Equals(NormalizeAssetPath(TrimmedOldName), ESearchCase::IgnoreCase)
+						&& !CurrentFunctionName.Equals(TrimmedOldName, ESearchCase::IgnoreCase))
+					{
+						continue;
+					}
+				}
+
+				const FString OldFunctionPath = FunctionCall->MaterialFunction ? NormalizeAssetPath(FunctionCall->MaterialFunction->GetPathName()) : FString();
+				if (OldFunctionPath.Equals(ReplacementFunctionPath, ESearchCase::IgnoreCase))
+				{
+					continue;
+				}
+
+				FunctionCall->Modify();
+				const bool bSetResult = FunctionCall->SetMaterialFunction(ReplacementFunction);
+				if (!bSetResult)
+				{
+					return MakeFailure(FString::Printf(TEXT("Failed to replace function call on node: %s"), *GetNodeId(FunctionCall)));
+				}
+
+				++ChangedCount;
+				TSharedPtr<FJsonObject> NodeObj = BuildNodeJson(FunctionCall);
+				NodeObj->SetStringField(TEXT("old_function_path"), OldFunctionPath);
+				NodeObj->SetStringField(TEXT("new_function_path"), ReplacementFunctionPath);
+				UpdatedNodes.Add(MakeShared<FJsonValueObject>(NodeObj));
+			}
+
+			if (ChangedCount > 0)
+			{
+				Context.MarkDirty();
+			}
+
+			TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+			Result->SetStringField(TEXT("symbol_type"), TEXT("function_call"));
+			Result->SetStringField(TEXT("new_function_path"), ReplacementFunctionPath);
+			Result->SetBoolField(TEXT("changed"), ChangedCount > 0);
+			Result->SetNumberField(TEXT("changed_count"), ChangedCount);
+			Result->SetArrayField(TEXT("updated_nodes"), UpdatedNodes);
+			return Result;
+		}
+
+		const FString TargetNodeId = !NodeId.TrimStartAndEnd().IsEmpty() ? NodeId.TrimStartAndEnd() : OldName.TrimStartAndEnd();
+		if (TargetNodeId.IsEmpty())
+		{
+			return MakeFailure(TEXT("symbol_type=node requires node_id (or old_name)"));
+		}
+
+		UMaterialExpression* TargetNode = FindNodeById(Context, TargetNodeId);
+		if (!TargetNode)
+		{
+			return MakeFailure(FString::Printf(TEXT("Node not found: %s"), *TargetNodeId));
+		}
+
+		const FString OldNodeLabel = TargetNode->IsA<UMaterialExpressionComment>()
+			? Cast<UMaterialExpressionComment>(TargetNode)->Text
+			: TargetNode->Desc;
+
+		TargetNode->Modify();
+		if (UMaterialExpressionComment* CommentNode = Cast<UMaterialExpressionComment>(TargetNode))
+		{
+			CommentNode->Text = TrimmedNewName;
+		}
+		else
+		{
+			TargetNode->Desc = TrimmedNewName;
+		}
+		Context.MarkDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("symbol_type"), TEXT("node"));
+		Result->SetStringField(TEXT("node_id"), GetNodeId(TargetNode));
+		Result->SetStringField(TEXT("old_name"), OldNodeLabel);
+		Result->SetStringField(TEXT("new_name"), TrimmedNewName);
+		Result->SetObjectField(TEXT("node"), BuildNodeJson(TargetNode));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleReplaceFunctionCalls(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	FString NewFunctionPath;
+	if (!Request.Params->TryGetStringField(TEXT("new_function_path"), NewFunctionPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'new_function_path'"));
+	}
+	NewFunctionPath = NewFunctionPath.TrimStartAndEnd();
+	if (NewFunctionPath.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'new_function_path' cannot be empty"));
+	}
+
+	FString OldFunctionPath;
+	Request.Params->TryGetStringField(TEXT("old_function_path"), OldFunctionPath);
+	const FString TrimmedOldFunctionPath = OldFunctionPath.TrimStartAndEnd();
+
+	FString OldFunctionName;
+	Request.Params->TryGetStringField(TEXT("old_function_name"), OldFunctionName);
+	const FString TrimmedOldFunctionName = OldFunctionName.TrimStartAndEnd();
+
+	auto Task = [AssetPath, NewFunctionPath, TrimmedOldFunctionPath, TrimmedOldFunctionName]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		const FString ReplacementPath = NormalizeAssetPath(NewFunctionPath);
+		if (!FPackageName::IsValidLongPackageName(ReplacementPath))
+		{
+			return MakeFailure(FString::Printf(TEXT("Invalid new_function_path: %s"), *NewFunctionPath));
+		}
+
+		UMaterialFunctionInterface* ReplacementFunction = LoadAssetAs<UMaterialFunctionInterface>(ReplacementPath);
+		if (!ReplacementFunction)
+		{
+			return MakeFailure(FString::Printf(TEXT("Replacement function not found: %s"), *ReplacementPath));
+		}
+
+		const FString FilterPath = NormalizeAssetPath(TrimmedOldFunctionPath);
+		const bool bFilterByPath = !FilterPath.IsEmpty();
+		const bool bFilterByName = !TrimmedOldFunctionName.IsEmpty();
+
+		TArray<UMaterialExpression*> Expressions;
+		TArray<UMaterialExpressionComment*> Comments;
+		GatherGraphNodes(Context, Expressions, Comments);
+
+		int32 ChangedCount = 0;
+		TArray<TSharedPtr<FJsonValue>> UpdatedNodes;
+		for (UMaterialExpression* Expression : Expressions)
+		{
+			UMaterialExpressionMaterialFunctionCall* FunctionCall = Cast<UMaterialExpressionMaterialFunctionCall>(Expression);
+			if (!FunctionCall)
+			{
+				continue;
+			}
+
+			const FString ExistingPath = FunctionCall->MaterialFunction ? NormalizeAssetPath(FunctionCall->MaterialFunction->GetPathName()) : FString();
+			const FString ExistingName = FunctionCall->MaterialFunction ? FunctionCall->MaterialFunction->GetName() : FString();
+
+			if (bFilterByPath && !ExistingPath.Equals(FilterPath, ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+			if (bFilterByName && !ExistingName.Equals(TrimmedOldFunctionName, ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+			if (ExistingPath.Equals(ReplacementPath, ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+
+			FunctionCall->Modify();
+			if (!FunctionCall->SetMaterialFunction(ReplacementFunction))
+			{
+				return MakeFailure(FString::Printf(TEXT("Failed to replace function call on node: %s"), *GetNodeId(FunctionCall)));
+			}
+
+			++ChangedCount;
+			TSharedPtr<FJsonObject> UpdatedNode = BuildNodeJson(FunctionCall);
+			UpdatedNode->SetStringField(TEXT("old_function_path"), ExistingPath);
+			UpdatedNode->SetStringField(TEXT("new_function_path"), ReplacementPath);
+			UpdatedNodes.Add(MakeShared<FJsonValueObject>(UpdatedNode));
+		}
+
+		if (ChangedCount > 0)
+		{
+			Context.MarkDirty();
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("new_function_path"), ReplacementPath);
+		Result->SetStringField(TEXT("old_function_path_filter"), FilterPath);
+		Result->SetStringField(TEXT("old_function_name_filter"), TrimmedOldFunctionName);
+		Result->SetBoolField(TEXT("changed"), ChangedCount > 0);
+		Result->SetNumberField(TEXT("changed_count"), ChangedCount);
+		Result->SetArrayField(TEXT("updated_nodes"), UpdatedNodes);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleRemoveUnusedParameters(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	bool bDryRun = false;
+	Request.Params->TryGetBoolField(TEXT("dry_run"), bDryRun);
+
+	auto Task = [AssetPath, bDryRun]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/remove_unused_parameters only supports UMaterial assets"));
+		}
+
+		TArray<UMaterialExpression*> Parameters;
+		GatherParameterExpressions(Context, Parameters);
+
+		TArray<EMaterialProperty> OutputProperties;
+		AddPhase4MaterialOutputProperties(OutputProperties);
+
+		TArray<UMaterialExpression*> Candidates;
+		for (UMaterialExpression* Parameter : Parameters)
+		{
+			if (!Parameter)
+			{
+				continue;
+			}
+
+			bool bUsed = false;
+			for (int32 OutputIndex = 0;; ++OutputIndex)
+			{
+				if (!Parameter->GetOutput(OutputIndex))
+				{
+					break;
+				}
+
+				if (CountOutputPinLinks(Context, Parameter, OutputIndex) > 0)
+				{
+					bUsed = true;
+					break;
+				}
+			}
+
+			if (!bUsed)
+			{
+				for (const EMaterialProperty OutputProperty : OutputProperties)
+				{
+					FExpressionInput* MaterialInput = Context.Material->GetExpressionInputForProperty(OutputProperty);
+					if (MaterialInput && MaterialInput->Expression == Parameter)
+					{
+						bUsed = true;
+						break;
+					}
+				}
+			}
+
+			if (!bUsed)
+			{
+				Candidates.Add(Parameter);
+			}
+		}
+
+		TArray<TSharedPtr<FJsonValue>> RemovedJson;
+		RemovedJson.Reserve(Candidates.Num());
+		if (!bDryRun)
+		{
+			for (UMaterialExpression* Candidate : Candidates)
+			{
+				if (!Candidate)
+				{
+					continue;
+				}
+				RemovedJson.Add(MakeShared<FJsonValueObject>(BuildParameterJson(Candidate)));
+				UMaterialEditingLibrary::DeleteMaterialExpression(Context.Material, Candidate);
+			}
+			if (RemovedJson.Num() > 0)
+			{
+				Context.MarkDirty();
+			}
+		}
+		else
+		{
+			for (UMaterialExpression* Candidate : Candidates)
+			{
+				if (Candidate)
+				{
+					RemovedJson.Add(MakeShared<FJsonValueObject>(BuildParameterJson(Candidate)));
+				}
+			}
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetBoolField(TEXT("dry_run"), bDryRun);
+		Result->SetNumberField(TEXT("candidate_count"), Candidates.Num());
+		Result->SetNumberField(TEXT("removed_count"), RemovedJson.Num());
+		Result->SetArrayField(TEXT("removed_parameters"), RemovedJson);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleRemoveOrphanNodes(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	bool bDryRun = false;
+	Request.Params->TryGetBoolField(TEXT("dry_run"), bDryRun);
+	bool bIncludeComments = false;
+	Request.Params->TryGetBoolField(TEXT("include_comments"), bIncludeComments);
+
+	auto Task = [AssetPath, bDryRun, bIncludeComments]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+
+		TArray<UMaterialExpression*> Expressions;
+		TArray<UMaterialExpressionComment*> Comments;
+		GatherGraphNodes(Context, Expressions, Comments);
+
+		TSet<UMaterialExpression*> Reachable;
+		TFunction<void(UMaterialExpression*)> MarkReachable;
+		MarkReachable = [&MarkReachable, &Reachable](UMaterialExpression* Node)
+		{
+			if (!Node || Reachable.Contains(Node))
+			{
+				return;
+			}
+
+			Reachable.Add(Node);
+			for (int32 InputIndex = 0;; ++InputIndex)
+			{
+				FExpressionInput* Input = Node->GetInput(InputIndex);
+				if (!Input)
+				{
+					break;
+				}
+				if (Input->Expression)
+				{
+					MarkReachable(Input->Expression);
+				}
+			}
+		};
+
+		if (Context.Material)
+		{
+			TArray<EMaterialProperty> OutputProperties;
+			AddPhase4MaterialOutputProperties(OutputProperties);
+			for (const EMaterialProperty OutputProperty : OutputProperties)
+			{
+				FExpressionInput* OutputInput = Context.Material->GetExpressionInputForProperty(OutputProperty);
+				if (OutputInput && OutputInput->Expression)
+				{
+					MarkReachable(OutputInput->Expression);
+				}
+			}
+		}
+		else if (Context.MaterialFunction)
+		{
+			TArray<UMaterialExpressionFunctionInput*> FunctionInputs;
+			TArray<UMaterialExpressionFunctionOutput*> FunctionOutputs;
+			GatherMaterialFunctionIONodes(Context.MaterialFunction, FunctionInputs, FunctionOutputs);
+			for (UMaterialExpressionFunctionOutput* OutputNode : FunctionOutputs)
+			{
+				if (!OutputNode)
+				{
+					continue;
+				}
+				MarkReachable(OutputNode);
+				if (OutputNode->A.Expression)
+				{
+					MarkReachable(OutputNode->A.Expression);
+				}
+			}
+		}
+
+		TArray<UMaterialExpression*> OrphanExpressions;
+		for (UMaterialExpression* Expression : Expressions)
+		{
+			if (!Expression || Reachable.Contains(Expression))
+			{
+				continue;
+			}
+			OrphanExpressions.Add(Expression);
+		}
+
+		TArray<UMaterialExpressionComment*> OrphanComments;
+		if (bIncludeComments)
+		{
+			for (UMaterialExpressionComment* Comment : Comments)
+			{
+				if (Comment)
+				{
+					OrphanComments.Add(Comment);
+				}
+			}
+		}
+
+		TArray<TSharedPtr<FJsonValue>> RemovedNodesJson;
+		RemovedNodesJson.Reserve(OrphanExpressions.Num() + OrphanComments.Num());
+
+		for (UMaterialExpression* OrphanExpression : OrphanExpressions)
+		{
+			if (OrphanExpression)
+			{
+				RemovedNodesJson.Add(MakeShared<FJsonValueObject>(BuildNodeJson(OrphanExpression)));
+			}
+		}
+		for (UMaterialExpressionComment* OrphanComment : OrphanComments)
+		{
+			if (OrphanComment)
+			{
+				RemovedNodesJson.Add(MakeShared<FJsonValueObject>(BuildNodeJson(OrphanComment)));
+			}
+		}
+
+		if (!bDryRun)
+		{
+			for (UMaterialExpression* OrphanExpression : OrphanExpressions)
+			{
+				if (!OrphanExpression)
+				{
+					continue;
+				}
+				if (Context.Material)
+				{
+					UMaterialEditingLibrary::DeleteMaterialExpression(Context.Material, OrphanExpression);
+				}
+				else if (Context.MaterialFunction)
+				{
+					UMaterialEditingLibrary::DeleteMaterialExpressionInFunction(Context.MaterialFunction, OrphanExpression);
+				}
+			}
+
+			for (UMaterialExpressionComment* OrphanComment : OrphanComments)
+			{
+				if (!OrphanComment)
+				{
+					continue;
+				}
+				if (Context.Material)
+				{
+					Context.Material->GetExpressionCollection().RemoveComment(OrphanComment);
+				}
+				else if (Context.MaterialFunction)
+				{
+					Context.MaterialFunction->GetExpressionCollection().RemoveComment(OrphanComment);
+				}
+				OrphanComment->MarkAsGarbage();
+			}
+
+			if (RemovedNodesJson.Num() > 0)
+			{
+				Context.MarkDirty();
+			}
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("asset_type"), Context.Material ? TEXT("material") : TEXT("material_function"));
+		Result->SetBoolField(TEXT("dry_run"), bDryRun);
+		Result->SetBoolField(TEXT("include_comments"), bIncludeComments);
+		Result->SetNumberField(TEXT("candidate_expression_count"), OrphanExpressions.Num());
+		Result->SetNumberField(TEXT("candidate_comment_count"), OrphanComments.Num());
+		Result->SetNumberField(TEXT("removed_count"), RemovedNodesJson.Num());
+		Result->SetArrayField(TEXT("removed_nodes"), RemovedNodesJson);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleCompileMaterial(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	int32 MaxMessages = INDEX_NONE;
+	double MaxMessagesNumber = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("max_messages"), MaxMessagesNumber))
+	{
+		if (MaxMessagesNumber < 0.0)
+		{
+			return InvalidParams(Request.Id, TEXT("'max_messages' must be >= 0"));
+		}
+		MaxMessages = FMath::FloorToInt(MaxMessagesNumber);
+	}
+
+	bool bIncludeMessages = true;
+	Request.Params->TryGetBoolField(TEXT("include_messages"), bIncludeMessages);
+
+	auto Task = [AssetPath, MaxMessages, bIncludeMessages]() -> TSharedPtr<FJsonObject>
+	{
+		FString MaterialInterfacePath;
+		FString Error;
+		UMaterialInterface* MaterialInterface = ResolveMaterialInterfaceAsset(AssetPath, MaterialInterfacePath, Error);
+		if (!MaterialInterface)
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterial* Material = Cast<UMaterial>(MaterialInterface);
+		if (!Material)
+		{
+			const UMaterialInstance* Instance = Cast<UMaterialInstance>(MaterialInterface);
+			Material = const_cast<UMaterial*>(Instance ? Instance->GetMaterial() : nullptr);
+		}
+		if (!Material)
+		{
+			return MakeFailure(TEXT("Unable to resolve a source material for compilation"));
+		}
+
+		UMaterialEditingLibrary::RecompileMaterial(Material);
+
+		FMaterialCompileDiagnostics Diagnostics;
+		GatherMaterialCompileDiagnostics(Material, Diagnostics);
+		const FMaterialStatistics ShaderStats = UMaterialEditingLibrary::GetStatistics(MaterialInterface);
+
+		TArray<TSharedPtr<FJsonValue>> ErrorNodesJson;
+		for (const TWeakObjectPtr<UMaterialExpression>& ErrorExpression : Diagnostics.ErrorExpressions)
+		{
+			if (UMaterialExpression* Node = ErrorExpression.Get())
+			{
+				ErrorNodesJson.Add(MakeShared<FJsonValueObject>(BuildNodeJson(Node)));
+			}
+		}
+
+		TArray<TSharedPtr<FJsonValue>> CompileErrorsJson;
+		for (const FString& CompileError : Diagnostics.CompileErrors)
+		{
+			CompileErrorsJson.Add(MakeShared<FJsonValueString>(CompileError));
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), MaterialInterfacePath);
+		Result->SetStringField(TEXT("material_path"), NormalizeAssetPath(Material->GetPathName()));
+		Result->SetBoolField(TEXT("compiled"), true);
+		Result->SetBoolField(TEXT("is_compiling"), Diagnostics.bIsCompiling);
+		Result->SetBoolField(TEXT("had_compile_error"), Diagnostics.bHadCompileError);
+		Result->SetNumberField(TEXT("num_errors"), Diagnostics.CompileErrors.Num());
+		Result->SetArrayField(TEXT("compile_errors"), CompileErrorsJson);
+		Result->SetArrayField(TEXT("error_nodes"), ErrorNodesJson);
+		Result->SetNumberField(TEXT("error_node_count"), ErrorNodesJson.Num());
+		Result->SetNumberField(TEXT("num_vertex_shader_instructions"), ShaderStats.NumVertexShaderInstructions);
+		Result->SetNumberField(TEXT("num_pixel_shader_instructions"), ShaderStats.NumPixelShaderInstructions);
+		Result->SetNumberField(TEXT("num_samplers"), ShaderStats.NumSamplers);
+		Result->SetNumberField(TEXT("num_vertex_texture_samples"), ShaderStats.NumVertexTextureSamples);
+		Result->SetNumberField(TEXT("num_pixel_texture_samples"), ShaderStats.NumPixelTextureSamples);
+		Result->SetNumberField(TEXT("num_virtual_texture_samples"), ShaderStats.NumVirtualTextureSamples);
+		Result->SetNumberField(TEXT("num_uv_scalars"), ShaderStats.NumUVScalars);
+		Result->SetNumberField(TEXT("num_interpolator_scalars"), ShaderStats.NumInterpolatorScalars);
+
+		if (bIncludeMessages)
+		{
+			const TArray<TSharedPtr<FJsonValue>> Messages = BuildMaterialCompileMessagesJson(Diagnostics, MaxMessages);
+			Result->SetArrayField(TEXT("messages"), Messages);
+			Result->SetNumberField(TEXT("message_count"), Messages.Num());
+		}
+
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleGetCompileResult(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	bool bCompile = false;
+	Request.Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+	bool bIncludeMessages = true;
+	Request.Params->TryGetBoolField(TEXT("include_messages"), bIncludeMessages);
+
+	int32 MaxMessages = INDEX_NONE;
+	double MaxMessagesNumber = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("max_messages"), MaxMessagesNumber))
+	{
+		if (MaxMessagesNumber < 0.0)
+		{
+			return InvalidParams(Request.Id, TEXT("'max_messages' must be >= 0"));
+		}
+		MaxMessages = FMath::FloorToInt(MaxMessagesNumber);
+	}
+
+	auto Task = [AssetPath, bCompile, bIncludeMessages, MaxMessages]() -> TSharedPtr<FJsonObject>
+	{
+		FString MaterialInterfacePath;
+		FString Error;
+		UMaterialInterface* MaterialInterface = ResolveMaterialInterfaceAsset(AssetPath, MaterialInterfacePath, Error);
+		if (!MaterialInterface)
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterial* Material = Cast<UMaterial>(MaterialInterface);
+		if (!Material)
+		{
+			const UMaterialInstance* Instance = Cast<UMaterialInstance>(MaterialInterface);
+			Material = const_cast<UMaterial*>(Instance ? Instance->GetMaterial() : nullptr);
+		}
+		if (!Material)
+		{
+			return MakeFailure(TEXT("Unable to resolve a source material for diagnostics"));
+		}
+
+		if (bCompile)
+		{
+			UMaterialEditingLibrary::RecompileMaterial(Material);
+		}
+
+		FMaterialCompileDiagnostics Diagnostics;
+		GatherMaterialCompileDiagnostics(Material, Diagnostics);
+
+		TArray<TSharedPtr<FJsonValue>> ErrorNodesJson;
+		for (const TWeakObjectPtr<UMaterialExpression>& ErrorExpression : Diagnostics.ErrorExpressions)
+		{
+			if (UMaterialExpression* Node = ErrorExpression.Get())
+			{
+				ErrorNodesJson.Add(MakeShared<FJsonValueObject>(BuildNodeJson(Node)));
+			}
+		}
+
+		TArray<TSharedPtr<FJsonValue>> CompileErrorsJson;
+		for (const FString& CompileError : Diagnostics.CompileErrors)
+		{
+			CompileErrorsJson.Add(MakeShared<FJsonValueString>(CompileError));
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), MaterialInterfacePath);
+		Result->SetStringField(TEXT("material_path"), NormalizeAssetPath(Material->GetPathName()));
+		Result->SetBoolField(TEXT("compiled"), bCompile);
+		Result->SetBoolField(TEXT("is_compiling"), Diagnostics.bIsCompiling);
+		Result->SetBoolField(TEXT("had_compile_error"), Diagnostics.bHadCompileError);
+		Result->SetNumberField(TEXT("num_errors"), Diagnostics.CompileErrors.Num());
+		Result->SetArrayField(TEXT("compile_errors"), CompileErrorsJson);
+		Result->SetArrayField(TEXT("error_nodes"), ErrorNodesJson);
+		Result->SetNumberField(TEXT("error_node_count"), ErrorNodesJson.Num());
+
+		if (bIncludeMessages)
+		{
+			const TArray<TSharedPtr<FJsonValue>> Messages = BuildMaterialCompileMessagesJson(Diagnostics, MaxMessages);
+			Result->SetArrayField(TEXT("messages"), Messages);
+			Result->SetNumberField(TEXT("message_count"), Messages.Num());
+		}
+
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleValidateMaterial(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	bool bCompile = false;
+	Request.Params->TryGetBoolField(TEXT("compile"), bCompile);
+	bool bIncludeIssues = true;
+	Request.Params->TryGetBoolField(TEXT("include_issues"), bIncludeIssues);
+
+	auto Task = [AssetPath, bCompile, bIncludeIssues]() -> TSharedPtr<FJsonObject>
+	{
+		FString ResolvedAssetPath;
+		FString AssetKind;
+		FString Error;
+		UObject* Asset = ResolveMaterialManagedAsset(AssetPath, ResolvedAssetPath, AssetKind, Error);
+		if (!Asset)
+		{
+			return MakeFailure(Error);
+		}
+
+		const bool bPackageDirtyBefore = Asset->GetOutermost() ? Asset->GetOutermost()->IsDirty() : false;
+
+		if (bCompile)
+		{
+			if (UMaterial* Material = Cast<UMaterial>(Asset))
+			{
+				UMaterialEditingLibrary::RecompileMaterial(Material);
+			}
+		}
+
+		FDataValidationContext ValidationContext;
+		const EDataValidationResult ValidationResult = Asset->IsDataValid(ValidationContext);
+		const bool bPackageDirtyAfter = Asset->GetOutermost() ? Asset->GetOutermost()->IsDirty() : false;
+
+		FMaterialCompileDiagnostics Diagnostics;
+		if (UMaterial* Material = Cast<UMaterial>(Asset))
+		{
+			GatherMaterialCompileDiagnostics(Material, Diagnostics);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ValidationIssuesJson;
+		if (bIncludeIssues)
+		{
+			ValidationIssuesJson.Reserve(ValidationContext.GetIssues().Num());
+			for (const FDataValidationContext::FIssue& Issue : ValidationContext.GetIssues())
+			{
+				ValidationIssuesJson.Add(MakeShared<FJsonValueObject>(BuildMaterialValidationIssueJson(Issue)));
+			}
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), ResolvedAssetPath);
+		Result->SetStringField(TEXT("asset_kind"), AssetKind);
+		Result->SetBoolField(TEXT("compiled"), bCompile && Cast<UMaterial>(Asset) != nullptr);
+		Result->SetBoolField(TEXT("include_issues"), bIncludeIssues);
+		Result->SetNumberField(TEXT("validation_result"), static_cast<int32>(ValidationResult));
+		Result->SetStringField(TEXT("validation_result_name"), MaterialDataValidationResultToString(ValidationResult));
+		Result->SetNumberField(TEXT("validation_issue_count"), ValidationContext.GetIssues().Num());
+		Result->SetNumberField(TEXT("validation_num_errors"), ValidationContext.GetNumErrors());
+		Result->SetNumberField(TEXT("validation_num_warnings"), ValidationContext.GetNumWarnings());
+		Result->SetBoolField(TEXT("package_dirty_before"), bPackageDirtyBefore);
+		Result->SetBoolField(TEXT("package_dirty_after"), bPackageDirtyAfter);
+		Result->SetBoolField(TEXT("mutated"), bPackageDirtyBefore != bPackageDirtyAfter);
+		Result->SetBoolField(TEXT("has_compile_errors"), Diagnostics.CompileErrors.Num() > 0);
+		Result->SetNumberField(TEXT("compile_error_count"), Diagnostics.CompileErrors.Num());
+		Result->SetBoolField(
+			TEXT("preflight_passed"),
+			ValidationContext.GetNumErrors() == 0
+			&& ValidationResult != EDataValidationResult::Invalid
+			&& Diagnostics.CompileErrors.Num() == 0
+		);
+
+		if (bIncludeIssues)
+		{
+			Result->SetArrayField(TEXT("validation_issues"), ValidationIssuesJson);
+		}
+
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleGetMaterialStatus(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	auto Task = [AssetPath]() -> TSharedPtr<FJsonObject>
+	{
+		FString ResolvedAssetPath;
+		FString AssetKind;
+		FString Error;
+		UObject* Asset = ResolveMaterialManagedAsset(AssetPath, ResolvedAssetPath, AssetKind, Error);
+		if (!Asset)
+		{
+			return MakeFailure(Error);
+		}
+
+		FDataValidationContext ValidationContext;
+		const EDataValidationResult ValidationResult = Asset->IsDataValid(ValidationContext);
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), ResolvedAssetPath);
+		Result->SetStringField(TEXT("asset_kind"), AssetKind);
+		Result->SetBoolField(TEXT("package_dirty"), Asset->GetOutermost() ? Asset->GetOutermost()->IsDirty() : false);
+		Result->SetNumberField(TEXT("validation_result"), static_cast<int32>(ValidationResult));
+		Result->SetStringField(TEXT("validation_result_name"), MaterialDataValidationResultToString(ValidationResult));
+		Result->SetNumberField(TEXT("validation_num_errors"), ValidationContext.GetNumErrors());
+		Result->SetNumberField(TEXT("validation_num_warnings"), ValidationContext.GetNumWarnings());
+
+		if (UMaterial* Material = Cast<UMaterial>(Asset))
+		{
+			FMaterialCompileDiagnostics Diagnostics;
+			GatherMaterialCompileDiagnostics(Material, Diagnostics);
+
+			Result->SetBoolField(TEXT("is_compiling"), Diagnostics.bIsCompiling);
+			Result->SetBoolField(TEXT("had_compile_error"), Diagnostics.bHadCompileError);
+			Result->SetNumberField(TEXT("compile_error_count"), Diagnostics.CompileErrors.Num());
+			Result->SetNumberField(TEXT("expression_count"), Material->GetExpressions().Num());
+			Result->SetNumberField(TEXT("comment_count"), Material->GetEditorComments().Num());
+
+			WriteMaterialSettings(Material, Result);
+			return Result;
+		}
+
+		if (UMaterialFunction* Function = Cast<UMaterialFunction>(Asset))
+		{
+			TArray<UMaterialExpressionFunctionInput*> FunctionInputs;
+			TArray<UMaterialExpressionFunctionOutput*> FunctionOutputs;
+			GatherMaterialFunctionIONodes(Function, FunctionInputs, FunctionOutputs);
+
+			Result->SetNumberField(TEXT("expression_count"), Function->GetExpressions().Num());
+			Result->SetNumberField(TEXT("comment_count"), Function->GetEditorComments().Num());
+			Result->SetNumberField(TEXT("input_count"), FunctionInputs.Num());
+			Result->SetNumberField(TEXT("output_count"), FunctionOutputs.Num());
+			Result->SetStringField(TEXT("state_id"), Function->StateId.IsValid() ? Function->StateId.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+			return Result;
+		}
+
+		if (UMaterialInstanceConstant* Instance = Cast<UMaterialInstanceConstant>(Asset))
+		{
+			FStaticParameterSet StaticParameters = Instance->GetStaticParameters();
+			Result->SetStringField(TEXT("parent_path"), Instance->Parent ? NormalizeAssetPath(Instance->Parent->GetPathName()) : FString());
+			Result->SetNumberField(TEXT("scalar_override_count"), Instance->ScalarParameterValues.Num());
+			Result->SetNumberField(TEXT("vector_override_count"), Instance->VectorParameterValues.Num());
+			Result->SetNumberField(TEXT("texture_override_count"), Instance->TextureParameterValues.Num());
+			Result->SetNumberField(TEXT("static_switch_override_count"), StaticParameters.StaticSwitchParameters.Num());
+			Result->SetNumberField(TEXT("static_component_mask_override_count"), StaticParameters.EditorOnly.StaticComponentMaskParameters.Num());
+			return Result;
+		}
+
+		if (UMaterialParameterCollection* Collection = Cast<UMaterialParameterCollection>(Asset))
+		{
+			Result->SetStringField(TEXT("state_id"), Collection->StateId.IsValid() ? Collection->StateId.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+			Result->SetNumberField(TEXT("scalar_parameter_count"), Collection->ScalarParameters.Num());
+			Result->SetNumberField(TEXT("vector_parameter_count"), Collection->VectorParameters.Num());
+			Result->SetBoolField(TEXT("has_base_collection"), Collection->GetBaseParameterCollection() != nullptr);
+			Result->SetStringField(TEXT("base_collection_path"), Collection->GetBaseParameterCollection() ? NormalizeAssetPath(Collection->GetBaseParameterCollection()->GetPathName()) : FString());
+			return Result;
+		}
+
+		return MakeFailure(TEXT("Unsupported material asset type"));
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleListMaterialWarnings(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	bool bCompile = false;
+	Request.Params->TryGetBoolField(TEXT("compile"), bCompile);
+
+	int32 MaxResults = INDEX_NONE;
+	double MaxResultsNumber = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("max_results"), MaxResultsNumber))
+	{
+		if (MaxResultsNumber < 0.0)
+		{
+			return InvalidParams(Request.Id, TEXT("'max_results' must be >= 0"));
+		}
+		MaxResults = FMath::FloorToInt(MaxResultsNumber);
+	}
+
+	auto Task = [AssetPath, bCompile, MaxResults]() -> TSharedPtr<FJsonObject>
+	{
+		FString ResolvedAssetPath;
+		FString AssetKind;
+		FString Error;
+		UObject* Asset = ResolveMaterialManagedAsset(AssetPath, ResolvedAssetPath, AssetKind, Error);
+		if (!Asset)
+		{
+			return MakeFailure(Error);
+		}
+
+		if (bCompile)
+		{
+			if (UMaterial* Material = Cast<UMaterial>(Asset))
+			{
+				UMaterialEditingLibrary::RecompileMaterial(Material);
+			}
+		}
+
+		FDataValidationContext ValidationContext;
+		const EDataValidationResult ValidationResult = Asset->IsDataValid(ValidationContext);
+
+		int32 ValidationWarningCount = 0;
+		int32 ValidationErrorCount = 0;
+		TArray<TSharedPtr<FJsonValue>> WarningsJson;
+		for (const FDataValidationContext::FIssue& Issue : ValidationContext.GetIssues())
+		{
+			const bool bIsWarning = Issue.Severity == EMessageSeverity::Warning || Issue.Severity == EMessageSeverity::PerformanceWarning;
+			const bool bIsError = Issue.Severity == EMessageSeverity::Error;
+
+			if (bIsWarning)
+			{
+				++ValidationWarningCount;
+				if (MaxResults < 0 || WarningsJson.Num() < MaxResults)
+				{
+					WarningsJson.Add(MakeShared<FJsonValueObject>(BuildMaterialValidationIssueJson(Issue)));
+				}
+			}
+			else if (bIsError)
+			{
+				++ValidationErrorCount;
+			}
+		}
+
+		FMaterialCompileDiagnostics Diagnostics;
+		if (UMaterial* Material = Cast<UMaterial>(Asset))
+		{
+			GatherMaterialCompileDiagnostics(Material, Diagnostics);
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), ResolvedAssetPath);
+		Result->SetStringField(TEXT("asset_kind"), AssetKind);
+		Result->SetBoolField(TEXT("compiled"), bCompile && Cast<UMaterial>(Asset) != nullptr);
+		Result->SetNumberField(TEXT("validation_result"), static_cast<int32>(ValidationResult));
+		Result->SetStringField(TEXT("validation_result_name"), MaterialDataValidationResultToString(ValidationResult));
+		Result->SetNumberField(TEXT("compile_error_count"), Diagnostics.CompileErrors.Num());
+		Result->SetNumberField(TEXT("validation_error_count"), ValidationErrorCount);
+		Result->SetNumberField(TEXT("validation_warning_count"), ValidationWarningCount);
+		Result->SetNumberField(TEXT("warning_count"), ValidationWarningCount);
+		Result->SetNumberField(TEXT("returned_warning_count"), WarningsJson.Num());
+		Result->SetArrayField(TEXT("warnings"), WarningsJson);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleGetShaderStats(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	auto Task = [AssetPath]() -> TSharedPtr<FJsonObject>
+	{
+		FString MaterialInterfacePath;
+		FString Error;
+		UMaterialInterface* MaterialInterface = ResolveMaterialInterfaceAsset(AssetPath, MaterialInterfacePath, Error);
+		if (!MaterialInterface)
+		{
+			return MakeFailure(Error);
+		}
+
+		const FMaterialStatistics Stats = UMaterialEditingLibrary::GetStatistics(MaterialInterface);
+		const double EstimatedCost = static_cast<double>(Stats.NumPixelShaderInstructions)
+			+ static_cast<double>(Stats.NumVertexShaderInstructions) * 0.25
+			+ static_cast<double>(Stats.NumSamplers) * 4.0
+			+ static_cast<double>(Stats.NumVirtualTextureSamples) * 2.0;
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), MaterialInterfacePath);
+		Result->SetStringField(TEXT("asset_kind"), MaterialInterface->IsA<UMaterial>() ? TEXT("material") : TEXT("material_instance"));
+		Result->SetStringField(TEXT("material_path"), NormalizeAssetPath(MaterialInterface->GetPathName()));
+		if (const UMaterialInstance* MaterialInstance = Cast<UMaterialInstance>(MaterialInterface))
+		{
+			Result->SetStringField(TEXT("parent_path"), MaterialInstance->Parent ? NormalizeAssetPath(MaterialInstance->Parent->GetPathName()) : FString());
+		}
+		Result->SetNumberField(TEXT("num_vertex_shader_instructions"), Stats.NumVertexShaderInstructions);
+		Result->SetNumberField(TEXT("num_pixel_shader_instructions"), Stats.NumPixelShaderInstructions);
+		Result->SetNumberField(TEXT("num_samplers"), Stats.NumSamplers);
+		Result->SetNumberField(TEXT("num_vertex_texture_samples"), Stats.NumVertexTextureSamples);
+		Result->SetNumberField(TEXT("num_pixel_texture_samples"), Stats.NumPixelTextureSamples);
+		Result->SetNumberField(TEXT("num_virtual_texture_samples"), Stats.NumVirtualTextureSamples);
+		Result->SetNumberField(TEXT("num_uv_scalars"), Stats.NumUVScalars);
+		Result->SetNumberField(TEXT("num_interpolator_scalars"), Stats.NumInterpolatorScalars);
+		Result->SetNumberField(TEXT("estimated_cost"), EstimatedCost);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleBeginTransaction(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString Description = TEXT("SpecialAgent Material Transaction");
+	FString TransactionContext = TEXT("SpecialAgent.Material");
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	Request.Params->TryGetStringField(TEXT("description"), Description);
+	Request.Params->TryGetStringField(TEXT("transaction_context"), TransactionContext);
+
+	auto Task = [this, AssetPath, Description, TransactionContext]() -> TSharedPtr<FJsonObject>
 	{
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		if (!GEditor)
+		{
+			return Fail(TEXT("Editor is unavailable"));
+		}
+
+		if (ActiveTransaction.IsSet() && !GEditor->IsTransactionActive())
+		{
+			ActiveTransaction.Reset();
+		}
+
+		if (ActiveTransaction.IsSet())
+		{
+			return Fail(FString::Printf(
+				TEXT("A managed material transaction is already active (%s). End or cancel it first."),
+				*ActiveTransaction->TransactionId
+			));
+		}
+		if (GEditor->IsTransactionActive())
+		{
+			return Fail(FString::Printf(
+				TEXT("Another editor transaction is already active ('%s'). Begin transaction aborted for safety."),
+				*GEditor->GetTransactionName().ToString()
+			));
+		}
+
+		FString ResolvedAssetPath;
+		FString AssetKind;
+		FString Error;
+		UObject* Asset = ResolveMaterialManagedAsset(AssetPath, ResolvedAssetPath, AssetKind, Error);
+		if (!Asset)
+		{
+			return Fail(Error);
+		}
+
+		const int32 TransactionIndex = GEditor->BeginTransaction(*TransactionContext, FText::FromString(Description), Asset);
+		if (TransactionIndex == INDEX_NONE)
+		{
+			return Fail(TEXT("Failed to begin transaction"));
+		}
+
+		Asset->Modify();
+
+		++TransactionSequence;
+		FMaterialTransactionState TransactionState;
+		TransactionState.TransactionId = FString::Printf(
+			TEXT("mat_tx_%d_%s"),
+			TransactionSequence,
+			*FGuid::NewGuid().ToString(EGuidFormats::Digits)
+		);
+		TransactionState.AssetPath = ResolvedAssetPath;
+		TransactionState.TransactionIndex = TransactionIndex;
+		TransactionState.Description = Description;
+		TransactionState.StartedAtUtc = FDateTime::UtcNow();
+
+		ActiveTransaction = TransactionState;
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("transaction_id"), TransactionState.TransactionId);
+		Result->SetStringField(TEXT("asset_path"), TransactionState.AssetPath);
+		Result->SetNumberField(TEXT("transaction_index"), TransactionState.TransactionIndex);
+		Result->SetStringField(TEXT("description"), TransactionState.Description);
+		Result->SetStringField(TEXT("transaction_context"), TransactionContext);
+		Result->SetStringField(TEXT("started_at_utc"), TransactionState.StartedAtUtc.ToIso8601());
+		Result->SetBoolField(TEXT("is_transaction_active"), GEditor->IsTransactionActive());
+		Result->SetStringField(TEXT("active_transaction_name"), GEditor->GetTransactionName().ToString());
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleEndTransaction(const FMCPRequest& Request)
+{
+	FString RequestedTransactionId;
+	if (Request.Params.IsValid())
+	{
+		Request.Params->TryGetStringField(TEXT("transaction_id"), RequestedTransactionId);
+	}
+
+	auto Task = [this, RequestedTransactionId]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		if (!GEditor)
+		{
+			return Fail(TEXT("Editor is unavailable"));
+		}
+
+		if (!ActiveTransaction.IsSet())
+		{
+			if (GEditor->IsTransactionActive())
+			{
+				return Fail(FString::Printf(
+					TEXT("An external transaction is active ('%s'). Refusing to end unknown transaction."),
+					*GEditor->GetTransactionName().ToString()
+				));
+			}
+			return Fail(TEXT("No managed material transaction is active"));
+		}
+
+		if (!RequestedTransactionId.IsEmpty() && !RequestedTransactionId.Equals(ActiveTransaction->TransactionId, ESearchCase::CaseSensitive))
+		{
+			return Fail(FString::Printf(TEXT("transaction_id mismatch. Expected '%s'"), *ActiveTransaction->TransactionId));
+		}
+
+		const FMaterialTransactionState CompletedTransaction = ActiveTransaction.GetValue();
+		if (!GEditor->IsTransactionActive())
+		{
+			ActiveTransaction.Reset();
+			return Fail(TEXT("Managed transaction became inactive before end_transaction was called"));
+		}
+
+		const int32 EndedTransactionIndex = GEditor->EndTransaction();
+		ActiveTransaction.Reset();
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("transaction_id"), CompletedTransaction.TransactionId);
+		Result->SetStringField(TEXT("asset_path"), CompletedTransaction.AssetPath);
+		Result->SetNumberField(TEXT("transaction_index"), CompletedTransaction.TransactionIndex);
+		Result->SetNumberField(TEXT("ended_transaction_index"), EndedTransactionIndex);
+		Result->SetStringField(TEXT("description"), CompletedTransaction.Description);
+		Result->SetStringField(TEXT("started_at_utc"), CompletedTransaction.StartedAtUtc.ToIso8601());
+		Result->SetBoolField(TEXT("is_transaction_active"), GEditor->IsTransactionActive());
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleCancelTransaction(const FMCPRequest& Request)
+{
+	FString RequestedTransactionId;
+	if (Request.Params.IsValid())
+	{
+		Request.Params->TryGetStringField(TEXT("transaction_id"), RequestedTransactionId);
+	}
+
+	auto Task = [this, RequestedTransactionId]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		if (!GEditor)
+		{
+			return Fail(TEXT("Editor is unavailable"));
+		}
+
+		if (!ActiveTransaction.IsSet())
+		{
+			if (GEditor->IsTransactionActive())
+			{
+				return Fail(FString::Printf(
+					TEXT("An external transaction is active ('%s'). Refusing to cancel unknown transaction."),
+					*GEditor->GetTransactionName().ToString()
+				));
+			}
+			return Fail(TEXT("No managed material transaction is active"));
+		}
+
+		if (!RequestedTransactionId.IsEmpty() && !RequestedTransactionId.Equals(ActiveTransaction->TransactionId, ESearchCase::CaseSensitive))
+		{
+			return Fail(FString::Printf(TEXT("transaction_id mismatch. Expected '%s'"), *ActiveTransaction->TransactionId));
+		}
+
+		const FMaterialTransactionState CancelledTransaction = ActiveTransaction.GetValue();
+		if (!GEditor->IsTransactionActive())
+		{
+			ActiveTransaction.Reset();
+			return Fail(TEXT("Managed transaction became inactive before cancel_transaction was called"));
+		}
+
+		const int32 EndedTransactionIndex = GEditor->EndTransaction();
+		const bool bCanUndo = GEditor->Trans && GEditor->Trans->CanUndo();
+		const bool bRolledBack = bCanUndo ? GEditor->Trans->Undo() : false;
+		ActiveTransaction.Reset();
+
+		if (!bRolledBack)
+		{
+			return Fail(TEXT("Transaction was ended but rollback failed. Manual undo may be required."));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("transaction_id"), CancelledTransaction.TransactionId);
+		Result->SetStringField(TEXT("asset_path"), CancelledTransaction.AssetPath);
+		Result->SetNumberField(TEXT("transaction_index"), CancelledTransaction.TransactionIndex);
+		Result->SetNumberField(TEXT("ended_transaction_index"), EndedTransactionIndex);
+		Result->SetStringField(TEXT("description"), CancelledTransaction.Description);
+		Result->SetStringField(TEXT("started_at_utc"), CancelledTransaction.StartedAtUtc.ToIso8601());
+		Result->SetBoolField(TEXT("cancelled"), true);
+		Result->SetBoolField(TEXT("rolled_back"), true);
+		Result->SetBoolField(TEXT("is_transaction_active"), GEditor->IsTransactionActive());
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleDryRunValidate(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	bool bIncludeIssues = true;
+	Request.Params->TryGetBoolField(TEXT("include_issues"), bIncludeIssues);
+
+	auto Task = [AssetPath, bIncludeIssues]() -> TSharedPtr<FJsonObject>
+	{
+		FString ResolvedAssetPath;
+		FString AssetKind;
+		FString Error;
+		UObject* Asset = ResolveMaterialManagedAsset(AssetPath, ResolvedAssetPath, AssetKind, Error);
+		if (!Asset)
+		{
+			return MakeFailure(Error);
+		}
+
+		const bool bPackageDirtyBefore = Asset->GetOutermost() ? Asset->GetOutermost()->IsDirty() : false;
+		FDataValidationContext ValidationContext;
+		const EDataValidationResult ValidationResult = Asset->IsDataValid(ValidationContext);
+		const bool bPackageDirtyAfter = Asset->GetOutermost() ? Asset->GetOutermost()->IsDirty() : false;
+
+		FMaterialCompileDiagnostics Diagnostics;
+		if (UMaterial* Material = Cast<UMaterial>(Asset))
+		{
+			GatherMaterialCompileDiagnostics(Material, Diagnostics);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ValidationIssuesJson;
+		if (bIncludeIssues)
+		{
+			ValidationIssuesJson.Reserve(ValidationContext.GetIssues().Num());
+			for (const FDataValidationContext::FIssue& Issue : ValidationContext.GetIssues())
+			{
+				ValidationIssuesJson.Add(MakeShared<FJsonValueObject>(BuildMaterialValidationIssueJson(Issue)));
+			}
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), ResolvedAssetPath);
+		Result->SetStringField(TEXT("asset_kind"), AssetKind);
+		Result->SetBoolField(TEXT("include_issues"), bIncludeIssues);
+		Result->SetBoolField(TEXT("mutated"), bPackageDirtyBefore != bPackageDirtyAfter);
+		Result->SetBoolField(TEXT("package_dirty_before"), bPackageDirtyBefore);
+		Result->SetBoolField(TEXT("package_dirty_after"), bPackageDirtyAfter);
+		Result->SetNumberField(TEXT("validation_result"), static_cast<int32>(ValidationResult));
+		Result->SetStringField(TEXT("validation_result_name"), MaterialDataValidationResultToString(ValidationResult));
+		Result->SetNumberField(TEXT("validation_issue_count"), ValidationContext.GetIssues().Num());
+		Result->SetNumberField(TEXT("validation_num_errors"), ValidationContext.GetNumErrors());
+		Result->SetNumberField(TEXT("validation_num_warnings"), ValidationContext.GetNumWarnings());
+		Result->SetBoolField(TEXT("has_compile_errors"), Diagnostics.CompileErrors.Num() > 0);
+		Result->SetNumberField(TEXT("compile_error_count"), Diagnostics.CompileErrors.Num());
+		Result->SetBoolField(
+			TEXT("preflight_passed"),
+			ValidationContext.GetNumErrors() == 0
+			&& ValidationResult != EDataValidationResult::Invalid
+			&& Diagnostics.CompileErrors.Num() == 0
+		);
+
+		if (bIncludeIssues)
+		{
+			Result->SetArrayField(TEXT("validation_issues"), ValidationIssuesJson);
+		}
+
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
+{
+	auto Task = [this]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+
+		if (ActiveTransaction.IsSet() && (!GEditor || !GEditor->IsTransactionActive()))
+		{
+			ActiveTransaction.Reset();
+		}
+
 		Result->SetBoolField(TEXT("success"), true);
 		Result->SetStringField(TEXT("service"), TEXT("material"));
 		Result->SetStringField(TEXT("engine_version"), FEngineVersion::Current().ToString());
@@ -8734,7 +10852,31 @@ FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 		PhasesObj->SetBoolField(TEXT("phase_6_material_instance_support"), true);
 		PhasesObj->SetBoolField(TEXT("phase_7_material_function_support"), true);
 		PhasesObj->SetBoolField(TEXT("phase_8_parameter_collection_support"), true);
+		PhasesObj->SetBoolField(TEXT("phase_9_refactor_symbol_operations"), true);
+		PhasesObj->SetBoolField(TEXT("phase_10_compile_diagnostics_validation"), true);
+		PhasesObj->SetBoolField(TEXT("phase_11_transactions_and_safety"), true);
+		PhasesObj->SetBoolField(TEXT("phase_12_material_type_coverage"), true);
 		Result->SetObjectField(TEXT("phases"), PhasesObj);
+
+		TSharedPtr<FJsonObject> Phase11Tools = MakeShared<FJsonObject>();
+		Phase11Tools->SetBoolField(TEXT("begin_transaction"), true);
+		Phase11Tools->SetBoolField(TEXT("end_transaction"), true);
+		Phase11Tools->SetBoolField(TEXT("cancel_transaction"), true);
+		Phase11Tools->SetBoolField(TEXT("dry_run_validate"), true);
+		Phase11Tools->SetBoolField(TEXT("capabilities"), true);
+		Result->SetObjectField(TEXT("phase11_tools"), Phase11Tools);
+
+		TSharedPtr<FJsonObject> TypeCoverage = MakeShared<FJsonObject>();
+		TypeCoverage->SetBoolField(TEXT("surface"), true);
+		TypeCoverage->SetBoolField(TEXT("deferred_decal"), true);
+		TypeCoverage->SetBoolField(TEXT("light_function"), true);
+		TypeCoverage->SetBoolField(TEXT("post_process"), true);
+		TypeCoverage->SetBoolField(TEXT("ui"), true);
+		TypeCoverage->SetBoolField(TEXT("volume"), true);
+		TypeCoverage->SetBoolField(TEXT("material_layer_blend_minimum_support"), true);
+		TypeCoverage->SetBoolField(TEXT("association_layer_parameters"), true);
+		TypeCoverage->SetBoolField(TEXT("association_blend_parameters"), true);
+		Result->SetObjectField(TEXT("phase12_type_coverage"), TypeCoverage);
 
 		TSharedPtr<FJsonObject> DependenciesObj = MakeShared<FJsonObject>();
 		DependenciesObj->SetBoolField(TEXT("material_editor_module_exists"), FModuleManager::Get().ModuleExists(TEXT("MaterialEditor")));
@@ -8745,6 +10887,30 @@ FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 		DependenciesObj->SetBoolField(TEXT("unreal_ed_module_exists"), FModuleManager::Get().ModuleExists(TEXT("UnrealEd")));
 		DependenciesObj->SetBoolField(TEXT("editor_scripting_utilities_module_exists"), FModuleManager::Get().ModuleExists(TEXT("EditorScriptingUtilities")));
 		Result->SetObjectField(TEXT("dependencies"), DependenciesObj);
+
+		TSharedPtr<FJsonObject> RuntimeObj = MakeShared<FJsonObject>();
+		RuntimeObj->SetBoolField(TEXT("editor_available"), GEditor != nullptr);
+		RuntimeObj->SetBoolField(TEXT("editor_transaction_active"), GEditor ? GEditor->IsTransactionActive() : false);
+		RuntimeObj->SetStringField(TEXT("editor_transaction_name"), GEditor ? GEditor->GetTransactionName().ToString() : FString());
+		RuntimeObj->SetBoolField(TEXT("managed_transaction_active"), ActiveTransaction.IsSet());
+		if (ActiveTransaction.IsSet())
+		{
+			TSharedPtr<FJsonObject> ActiveObj = MakeShared<FJsonObject>();
+			ActiveObj->SetStringField(TEXT("transaction_id"), ActiveTransaction->TransactionId);
+			ActiveObj->SetStringField(TEXT("asset_path"), ActiveTransaction->AssetPath);
+			ActiveObj->SetNumberField(TEXT("transaction_index"), ActiveTransaction->TransactionIndex);
+			ActiveObj->SetStringField(TEXT("description"), ActiveTransaction->Description);
+			ActiveObj->SetStringField(TEXT("started_at_utc"), ActiveTransaction->StartedAtUtc.ToIso8601());
+			RuntimeObj->SetObjectField(TEXT("active_transaction"), ActiveObj);
+		}
+		Result->SetObjectField(TEXT("runtime_state"), RuntimeObj);
+
+		TArray<TSharedPtr<FJsonValue>> NotesJson;
+		NotesJson.Add(MakeShared<FJsonValueString>(TEXT("Only one managed material transaction can be active at a time.")));
+		NotesJson.Add(MakeShared<FJsonValueString>(TEXT("Managed transaction tools refuse to end/cancel unknown external transactions.")));
+		NotesJson.Add(MakeShared<FJsonValueString>(TEXT("cancel_transaction performs rollback by ending the transaction and issuing a single Undo.")));
+		NotesJson.Add(MakeShared<FJsonValueString>(TEXT("dry_run_validate performs non-mutating validation checks and does not compile.")));
+		Result->SetArrayField(TEXT("notes"), NotesJson);
 
 		return Result;
 	};

@@ -85,5 +85,32 @@ private:
 	FMCPResponse HandleMaterialCollectionRemoveParameter(const FMCPRequest& Request);
 	FMCPResponse HandleMaterialCollectionRenameParameter(const FMCPRequest& Request);
 	FMCPResponse HandleMaterialCollectionSetDefaultValue(const FMCPRequest& Request);
+	FMCPResponse HandleFindReferences(const FMCPRequest& Request);
+	FMCPResponse HandleRenameSymbol(const FMCPRequest& Request);
+	FMCPResponse HandleReplaceFunctionCalls(const FMCPRequest& Request);
+	FMCPResponse HandleRemoveUnusedParameters(const FMCPRequest& Request);
+	FMCPResponse HandleRemoveOrphanNodes(const FMCPRequest& Request);
+	FMCPResponse HandleCompileMaterial(const FMCPRequest& Request);
+	FMCPResponse HandleGetCompileResult(const FMCPRequest& Request);
+	FMCPResponse HandleValidateMaterial(const FMCPRequest& Request);
+	FMCPResponse HandleGetMaterialStatus(const FMCPRequest& Request);
+	FMCPResponse HandleListMaterialWarnings(const FMCPRequest& Request);
+	FMCPResponse HandleGetShaderStats(const FMCPRequest& Request);
+	FMCPResponse HandleBeginTransaction(const FMCPRequest& Request);
+	FMCPResponse HandleEndTransaction(const FMCPRequest& Request);
+	FMCPResponse HandleCancelTransaction(const FMCPRequest& Request);
+	FMCPResponse HandleDryRunValidate(const FMCPRequest& Request);
 	FMCPResponse HandleCapabilities(const FMCPRequest& Request);
+
+	struct FMaterialTransactionState
+	{
+		FString TransactionId;
+		FString AssetPath;
+		int32 TransactionIndex = INDEX_NONE;
+		FString Description;
+		FDateTime StartedAtUtc;
+	};
+
+	TOptional<FMaterialTransactionState> ActiveTransaction;
+	int32 TransactionSequence = 0;
 };
