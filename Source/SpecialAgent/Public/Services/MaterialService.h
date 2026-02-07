@@ -59,5 +59,14 @@ private:
 	FMCPResponse HandleSetParameterDefault(const FMCPRequest& Request);
 	FMCPResponse HandleSetParameterMetadata(const FMCPRequest& Request);
 	FMCPResponse HandleSetParameterChannelNames(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialInstanceSetParent(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialInstanceListOverrides(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialInstanceClearOverride(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialInstanceSetScalar(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialInstanceSetVector(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialInstanceSetTexture(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialInstanceSetStaticSwitch(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialInstanceSetStaticComponentMask(const FMCPRequest& Request);
+	FMCPResponse HandleMaterialInstanceCopyOverridesFromInstance(const FMCPRequest& Request);
 	FMCPResponse HandleCapabilities(const FMCPRequest& Request);
 };

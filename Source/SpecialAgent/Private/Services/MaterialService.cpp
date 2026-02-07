@@ -1715,6 +1715,351 @@ namespace
 		return true;
 	}
 
+	enum class EMaterialInstanceOverrideType : uint8
+	{
+		Unknown,
+		Scalar,
+		Vector,
+		Texture,
+		StaticSwitch,
+		StaticComponentMask
+	};
+
+	static FString MaterialParameterAssociationToString(const EMaterialParameterAssociation Association)
+	{
+		switch (Association)
+		{
+		case EMaterialParameterAssociation::GlobalParameter:
+			return TEXT("global");
+		case EMaterialParameterAssociation::LayerParameter:
+			return TEXT("layer");
+		case EMaterialParameterAssociation::BlendParameter:
+			return TEXT("blend");
+		default:
+			return TEXT("unknown");
+		}
+	}
+
+	static bool ParseOptionalMaterialParameterAssociationAndIndex(
+		const TSharedPtr<FJsonObject>& Params,
+		EMaterialParameterAssociation& OutAssociation,
+		int32& OutIndex,
+		bool& bOutHasAssociation,
+		bool& bOutHasIndex,
+		FString& OutError)
+	{
+		OutAssociation = EMaterialParameterAssociation::GlobalParameter;
+		OutIndex = INDEX_NONE;
+		bOutHasAssociation = false;
+		bOutHasIndex = false;
+
+		if (!Params.IsValid())
+		{
+			return true;
+		}
+
+		double IndexNumeric = 0.0;
+		if (Params->TryGetNumberField(TEXT("index"), IndexNumeric) ||
+			Params->TryGetNumberField(TEXT("layer_index"), IndexNumeric))
+		{
+			bOutHasIndex = true;
+			OutIndex = static_cast<int32>(IndexNumeric);
+		}
+
+		FString AssociationString;
+		if (!Params->TryGetStringField(TEXT("association"), AssociationString))
+		{
+			return true;
+		}
+
+		const FString NormalizedAssociation = NormalizeParameterToken(AssociationString);
+		bOutHasAssociation = true;
+		if (NormalizedAssociation == TEXT("global") || NormalizedAssociation == TEXT("global_parameter"))
+		{
+			OutAssociation = EMaterialParameterAssociation::GlobalParameter;
+			if (!bOutHasIndex)
+			{
+				OutIndex = INDEX_NONE;
+			}
+			return true;
+		}
+		if (NormalizedAssociation == TEXT("layer") || NormalizedAssociation == TEXT("layer_parameter"))
+		{
+			OutAssociation = EMaterialParameterAssociation::LayerParameter;
+			if (!bOutHasIndex)
+			{
+				OutIndex = 0;
+			}
+			return true;
+		}
+		if (NormalizedAssociation == TEXT("blend") || NormalizedAssociation == TEXT("blend_parameter"))
+		{
+			OutAssociation = EMaterialParameterAssociation::BlendParameter;
+			if (!bOutHasIndex)
+			{
+				OutIndex = 0;
+			}
+			return true;
+		}
+
+		OutError = FString::Printf(TEXT("Unsupported association '%s'"), *AssociationString);
+		return false;
+	}
+
+	static bool ResolveMaterialParameterAssociationAndIndexForSet(
+		const TSharedPtr<FJsonObject>& Params,
+		EMaterialParameterAssociation& OutAssociation,
+		int32& OutIndex,
+		FString& OutError)
+	{
+		bool bHasAssociation = false;
+		bool bHasIndex = false;
+		if (!ParseOptionalMaterialParameterAssociationAndIndex(Params, OutAssociation, OutIndex, bHasAssociation, bHasIndex, OutError))
+		{
+			return false;
+		}
+
+		if (!bHasAssociation)
+		{
+			OutAssociation = EMaterialParameterAssociation::GlobalParameter;
+			OutIndex = INDEX_NONE;
+		}
+
+		if (!bHasIndex)
+		{
+			if (OutAssociation == EMaterialParameterAssociation::LayerParameter ||
+				OutAssociation == EMaterialParameterAssociation::BlendParameter)
+			{
+				OutIndex = 0;
+			}
+			else
+			{
+				OutIndex = INDEX_NONE;
+			}
+		}
+
+		return true;
+	}
+
+	static bool ParseOptionalMaterialInstanceOverrideType(
+		const TSharedPtr<FJsonObject>& Params,
+		EMaterialInstanceOverrideType& OutType,
+		bool& bOutHasType,
+		FString& OutError)
+	{
+		OutType = EMaterialInstanceOverrideType::Unknown;
+		bOutHasType = false;
+		if (!Params.IsValid())
+		{
+			return true;
+		}
+
+		FString TypeString;
+		if (!Params->TryGetStringField(TEXT("parameter_type"), TypeString) &&
+			!Params->TryGetStringField(TEXT("override_type"), TypeString))
+		{
+			return true;
+		}
+
+		const FString Token = NormalizeParameterToken(TypeString);
+		bOutHasType = true;
+		if (Token == TEXT("scalar") || Token == TEXT("float"))
+		{
+			OutType = EMaterialInstanceOverrideType::Scalar;
+			return true;
+		}
+		if (Token == TEXT("vector") || Token == TEXT("color"))
+		{
+			OutType = EMaterialInstanceOverrideType::Vector;
+			return true;
+		}
+		if (Token == TEXT("texture") || Token == TEXT("texture2d"))
+		{
+			OutType = EMaterialInstanceOverrideType::Texture;
+			return true;
+		}
+		if (Token == TEXT("static_switch") || Token == TEXT("switch"))
+		{
+			OutType = EMaterialInstanceOverrideType::StaticSwitch;
+			return true;
+		}
+		if (Token == TEXT("static_component_mask") || Token == TEXT("component_mask") || Token == TEXT("mask"))
+		{
+			OutType = EMaterialInstanceOverrideType::StaticComponentMask;
+			return true;
+		}
+
+		OutError = FString::Printf(TEXT("Unsupported override type '%s'"), *TypeString);
+		return false;
+	}
+
+	static FString MaterialInstanceOverrideTypeToString(const EMaterialInstanceOverrideType Type)
+	{
+		switch (Type)
+		{
+		case EMaterialInstanceOverrideType::Scalar:
+			return TEXT("scalar");
+		case EMaterialInstanceOverrideType::Vector:
+			return TEXT("vector");
+		case EMaterialInstanceOverrideType::Texture:
+			return TEXT("texture");
+		case EMaterialInstanceOverrideType::StaticSwitch:
+			return TEXT("static_switch");
+		case EMaterialInstanceOverrideType::StaticComponentMask:
+			return TEXT("static_component_mask");
+		default:
+			return TEXT("unknown");
+		}
+	}
+
+	static TSharedPtr<FJsonObject> BuildMaterialParameterInfoJson(const FMaterialParameterInfo& ParameterInfo)
+	{
+		TSharedPtr<FJsonObject> InfoObject = MakeShared<FJsonObject>();
+		InfoObject->SetStringField(TEXT("name"), ParameterInfo.Name.ToString());
+		InfoObject->SetStringField(TEXT("association"), MaterialParameterAssociationToString(ParameterInfo.Association));
+		InfoObject->SetNumberField(TEXT("index"), ParameterInfo.Index);
+		return InfoObject;
+	}
+
+	static bool MatchesMaterialParameterInfo(
+		const FMaterialParameterInfo& ParameterInfo,
+		const FString& ParameterName,
+		const bool bHasAssociation,
+		const EMaterialParameterAssociation Association,
+		const bool bHasIndex,
+		const int32 Index)
+	{
+		if (!ParameterInfo.Name.ToString().Equals(ParameterName, ESearchCase::IgnoreCase))
+		{
+			return false;
+		}
+		if (bHasAssociation && ParameterInfo.Association != Association)
+		{
+			return false;
+		}
+		if (bHasIndex && ParameterInfo.Index != Index)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	static UMaterialInstanceConstant* ResolveMaterialInstance(const FString& InputPath, FString& OutAssetPath, FString& OutError)
+	{
+		OutAssetPath = NormalizeAssetPath(InputPath);
+		if (!FPackageName::IsValidLongPackageName(OutAssetPath))
+		{
+			OutError = FString::Printf(TEXT("Invalid material instance path: %s"), *InputPath);
+			return nullptr;
+		}
+
+		UMaterialInstanceConstant* Instance = LoadAssetAs<UMaterialInstanceConstant>(OutAssetPath);
+		if (!Instance)
+		{
+			OutError = FString::Printf(TEXT("Material instance not found: %s"), *OutAssetPath);
+			return nullptr;
+		}
+
+		return Instance;
+	}
+
+	static TSharedPtr<FJsonObject> BuildScalarOverrideJson(const FScalarParameterValue& Value)
+	{
+		TSharedPtr<FJsonObject> OverrideObject = MakeShared<FJsonObject>();
+		OverrideObject->SetStringField(TEXT("parameter_type"), TEXT("scalar"));
+		OverrideObject->SetStringField(TEXT("parameter_name"), Value.ParameterInfo.Name.ToString());
+		OverrideObject->SetObjectField(TEXT("parameter_info"), BuildMaterialParameterInfoJson(Value.ParameterInfo));
+		OverrideObject->SetNumberField(TEXT("value"), Value.ParameterValue);
+		return OverrideObject;
+	}
+
+	static TSharedPtr<FJsonObject> BuildVectorOverrideJson(const FVectorParameterValue& Value)
+	{
+		TSharedPtr<FJsonObject> OverrideObject = MakeShared<FJsonObject>();
+		OverrideObject->SetStringField(TEXT("parameter_type"), TEXT("vector"));
+		OverrideObject->SetStringField(TEXT("parameter_name"), Value.ParameterInfo.Name.ToString());
+		OverrideObject->SetObjectField(TEXT("parameter_info"), BuildMaterialParameterInfoJson(Value.ParameterInfo));
+		OverrideObject->SetObjectField(TEXT("value"), BuildColorJson(Value.ParameterValue));
+		return OverrideObject;
+	}
+
+	static TSharedPtr<FJsonObject> BuildTextureOverrideJson(const FTextureParameterValue& Value)
+	{
+		TSharedPtr<FJsonObject> OverrideObject = MakeShared<FJsonObject>();
+		OverrideObject->SetStringField(TEXT("parameter_type"), TEXT("texture"));
+		OverrideObject->SetStringField(TEXT("parameter_name"), Value.ParameterInfo.Name.ToString());
+		OverrideObject->SetObjectField(TEXT("parameter_info"), BuildMaterialParameterInfoJson(Value.ParameterInfo));
+		OverrideObject->SetStringField(TEXT("value"), Value.ParameterValue ? Value.ParameterValue->GetPathName() : FString());
+		return OverrideObject;
+	}
+
+	static TSharedPtr<FJsonObject> BuildStaticSwitchOverrideJson(const FStaticSwitchParameter& Value)
+	{
+		TSharedPtr<FJsonObject> OverrideObject = MakeShared<FJsonObject>();
+		OverrideObject->SetStringField(TEXT("parameter_type"), TEXT("static_switch"));
+		OverrideObject->SetStringField(TEXT("parameter_name"), Value.ParameterInfo.Name.ToString());
+		OverrideObject->SetObjectField(TEXT("parameter_info"), BuildMaterialParameterInfoJson(Value.ParameterInfo));
+		OverrideObject->SetBoolField(TEXT("value"), Value.Value);
+		OverrideObject->SetBoolField(TEXT("is_override"), Value.bOverride);
+		OverrideObject->SetStringField(TEXT("expression_guid"), Value.ExpressionGUID.IsValid() ? Value.ExpressionGUID.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+		return OverrideObject;
+	}
+
+	static TSharedPtr<FJsonObject> BuildStaticComponentMaskOverrideJson(const FStaticComponentMaskParameter& Value)
+	{
+		TSharedPtr<FJsonObject> OverrideObject = MakeShared<FJsonObject>();
+		OverrideObject->SetStringField(TEXT("parameter_type"), TEXT("static_component_mask"));
+		OverrideObject->SetStringField(TEXT("parameter_name"), Value.ParameterInfo.Name.ToString());
+		OverrideObject->SetObjectField(TEXT("parameter_info"), BuildMaterialParameterInfoJson(Value.ParameterInfo));
+		OverrideObject->SetObjectField(TEXT("value"), BuildMaskJson(Value.R, Value.G, Value.B, Value.A));
+		OverrideObject->SetBoolField(TEXT("is_override"), Value.bOverride);
+		OverrideObject->SetStringField(TEXT("expression_guid"), Value.ExpressionGUID.IsValid() ? Value.ExpressionGUID.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+		return OverrideObject;
+	}
+
+	static bool TryReadMaterialInstanceMaskValue(
+		const TSharedPtr<FJsonObject>& Params,
+		bool& OutR,
+		bool& OutG,
+		bool& OutB,
+		bool& OutA,
+		FString& OutError)
+	{
+		if (!Params.IsValid())
+		{
+			OutError = TEXT("Missing params object");
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject>* ValueObject = nullptr;
+		if ((Params->TryGetObjectField(TEXT("value"), ValueObject) || Params->TryGetObjectField(TEXT("value_mask"), ValueObject)) && ValueObject && ValueObject->IsValid())
+		{
+			const TSharedPtr<FJsonObject>& MaskObject = *ValueObject;
+			const bool bHasR = MaskObject->TryGetBoolField(TEXT("r"), OutR);
+			const bool bHasG = MaskObject->TryGetBoolField(TEXT("g"), OutG);
+			const bool bHasB = MaskObject->TryGetBoolField(TEXT("b"), OutB);
+			const bool bHasA = MaskObject->TryGetBoolField(TEXT("a"), OutA);
+			if (!(bHasR && bHasG && bHasB && bHasA))
+			{
+				OutError = TEXT("Mask object must include boolean r, g, b, and a fields");
+				return false;
+			}
+			return true;
+		}
+
+		const bool bHasR = Params->TryGetBoolField(TEXT("value_r"), OutR) || Params->TryGetBoolField(TEXT("r"), OutR);
+		const bool bHasG = Params->TryGetBoolField(TEXT("value_g"), OutG) || Params->TryGetBoolField(TEXT("g"), OutG);
+		const bool bHasB = Params->TryGetBoolField(TEXT("value_b"), OutB) || Params->TryGetBoolField(TEXT("b"), OutB);
+		const bool bHasA = Params->TryGetBoolField(TEXT("value_a"), OutA) || Params->TryGetBoolField(TEXT("a"), OutA);
+		if (bHasR && bHasG && bHasB && bHasA)
+		{
+			return true;
+		}
+
+		OutError = TEXT("Missing mask value; provide value{r,g,b,a} or value_r/value_g/value_b/value_a");
+		return false;
+	}
+
 	static void WriteMaterialSettings(const UMaterial* Material, const TSharedPtr<FJsonObject>& Result)
 	{
 		Result->SetStringField(TEXT("domain"), DomainToString(Material->MaterialDomain));
@@ -1802,6 +2147,15 @@ TArray<FMCPToolInfo> FMaterialService::GetAvailableTools() const
 	AddTool(TEXT("set_parameter_default"), TEXT("Set the default value on a parameter expression."));
 	AddTool(TEXT("set_parameter_metadata"), TEXT("Set parameter metadata (group, sort priority, description)."));
 	AddTool(TEXT("set_parameter_channel_names"), TEXT("Set channel display names for vector/texture parameters."));
+	AddTool(TEXT("material_instance/set_parent"), TEXT("Set the parent material or material instance for a material instance."));
+	AddTool(TEXT("material_instance/list_overrides"), TEXT("List parameter overrides on a material instance."));
+	AddTool(TEXT("material_instance/clear_override"), TEXT("Clear one parameter override on a material instance."));
+	AddTool(TEXT("material_instance/set_scalar"), TEXT("Set a scalar parameter override on a material instance."));
+	AddTool(TEXT("material_instance/set_vector"), TEXT("Set a vector parameter override on a material instance."));
+	AddTool(TEXT("material_instance/set_texture"), TEXT("Set a texture parameter override on a material instance."));
+	AddTool(TEXT("material_instance/set_static_switch"), TEXT("Set a static switch parameter override on a material instance."));
+	AddTool(TEXT("material_instance/set_static_component_mask"), TEXT("Set a static component mask override on a material instance."));
+	AddTool(TEXT("material_instance/copy_overrides_from_instance"), TEXT("Copy overrides from one material instance to another."));
 	AddTool(TEXT("capabilities"), TEXT("Report baseline material service capabilities and module availability."));
 	return Tools;
 }
@@ -1845,6 +2199,15 @@ FMCPResponse FMaterialService::HandleRequest(const FMCPRequest& Request, const F
 	if (MethodName == TEXT("set_parameter_default")) return HandleSetParameterDefault(Request);
 	if (MethodName == TEXT("set_parameter_metadata")) return HandleSetParameterMetadata(Request);
 	if (MethodName == TEXT("set_parameter_channel_names")) return HandleSetParameterChannelNames(Request);
+	if (MethodName == TEXT("material_instance/set_parent")) return HandleMaterialInstanceSetParent(Request);
+	if (MethodName == TEXT("material_instance/list_overrides")) return HandleMaterialInstanceListOverrides(Request);
+	if (MethodName == TEXT("material_instance/clear_override")) return HandleMaterialInstanceClearOverride(Request);
+	if (MethodName == TEXT("material_instance/set_scalar")) return HandleMaterialInstanceSetScalar(Request);
+	if (MethodName == TEXT("material_instance/set_vector")) return HandleMaterialInstanceSetVector(Request);
+	if (MethodName == TEXT("material_instance/set_texture")) return HandleMaterialInstanceSetTexture(Request);
+	if (MethodName == TEXT("material_instance/set_static_switch")) return HandleMaterialInstanceSetStaticSwitch(Request);
+	if (MethodName == TEXT("material_instance/set_static_component_mask")) return HandleMaterialInstanceSetStaticComponentMask(Request);
+	if (MethodName == TEXT("material_instance/copy_overrides_from_instance")) return HandleMaterialInstanceCopyOverridesFromInstance(Request);
 	if (MethodName == TEXT("capabilities")) return HandleCapabilities(Request);
 	return MethodNotFound(Request.Id, TEXT("material"), MethodName);
 }
@@ -5084,6 +5447,913 @@ FMCPResponse FMaterialService::HandleSetParameterChannelNames(const FMCPRequest&
 	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
 }
 
+FMCPResponse FMaterialService::HandleMaterialInstanceSetParent(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString MaterialInstancePath;
+	if (!Request.Params->TryGetStringField(TEXT("material_instance_path"), MaterialInstancePath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_instance_path'"));
+	}
+
+	FString ParentPath;
+	if (!Request.Params->TryGetStringField(TEXT("parent_path"), ParentPath))
+	{
+		Request.Params->TryGetStringField(TEXT("parent_material_path"), ParentPath);
+	}
+
+	auto Task = [MaterialInstancePath, ParentPath]() -> TSharedPtr<FJsonObject>
+	{
+		FString AssetPath;
+		FString Error;
+		UMaterialInstanceConstant* Instance = ResolveMaterialInstance(MaterialInstancePath, AssetPath, Error);
+		if (!Instance)
+		{
+			return MakeFailure(Error);
+		}
+
+		UMaterialInterface* PreviousParent = Instance->Parent;
+		UMaterialInterface* NewParent = nullptr;
+
+		const FString TrimmedParentPath = ParentPath.TrimStartAndEnd();
+		if (!TrimmedParentPath.IsEmpty())
+		{
+			NewParent = LoadAssetAs<UMaterialInterface>(TrimmedParentPath);
+			if (!NewParent)
+			{
+				return MakeFailure(FString::Printf(TEXT("Parent material/interface not found: %s"), *TrimmedParentPath));
+			}
+		}
+
+		Instance->Modify();
+		UMaterialEditingLibrary::SetMaterialInstanceParent(Instance, NewParent);
+		UMaterialEditingLibrary::UpdateMaterialInstance(Instance);
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_instance_path"), AssetPath);
+		Result->SetStringField(TEXT("previous_parent_path"), PreviousParent ? PreviousParent->GetPathName() : FString());
+		Result->SetStringField(TEXT("parent_path"), Instance->Parent ? Instance->Parent->GetPathName() : FString());
+		Result->SetBoolField(TEXT("changed"), PreviousParent != Instance->Parent);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialInstanceListOverrides(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString MaterialInstancePath;
+	if (!Request.Params->TryGetStringField(TEXT("material_instance_path"), MaterialInstancePath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_instance_path'"));
+	}
+
+	bool bIncludeStaticNonOverrides = false;
+	Request.Params->TryGetBoolField(TEXT("include_static_non_overrides"), bIncludeStaticNonOverrides);
+
+	EMaterialInstanceOverrideType TypeFilter = EMaterialInstanceOverrideType::Unknown;
+	bool bHasTypeFilter = false;
+	FString TypeError;
+	if (!ParseOptionalMaterialInstanceOverrideType(Request.Params, TypeFilter, bHasTypeFilter, TypeError))
+	{
+		return InvalidParams(Request.Id, TypeError);
+	}
+
+	auto Task = [MaterialInstancePath, bHasTypeFilter, TypeFilter, bIncludeStaticNonOverrides]() -> TSharedPtr<FJsonObject>
+	{
+		FString AssetPath;
+		FString Error;
+		UMaterialInstanceConstant* Instance = ResolveMaterialInstance(MaterialInstancePath, AssetPath, Error);
+		if (!Instance)
+		{
+			return MakeFailure(Error);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ScalarOverrides;
+		TArray<TSharedPtr<FJsonValue>> VectorOverrides;
+		TArray<TSharedPtr<FJsonValue>> TextureOverrides;
+		TArray<TSharedPtr<FJsonValue>> StaticSwitchOverrides;
+		TArray<TSharedPtr<FJsonValue>> StaticComponentMaskOverrides;
+
+		if (!bHasTypeFilter || TypeFilter == EMaterialInstanceOverrideType::Scalar)
+		{
+			for (const FScalarParameterValue& Value : Instance->ScalarParameterValues)
+			{
+				ScalarOverrides.Add(MakeShared<FJsonValueObject>(BuildScalarOverrideJson(Value)));
+			}
+		}
+
+		if (!bHasTypeFilter || TypeFilter == EMaterialInstanceOverrideType::Vector)
+		{
+			for (const FVectorParameterValue& Value : Instance->VectorParameterValues)
+			{
+				VectorOverrides.Add(MakeShared<FJsonValueObject>(BuildVectorOverrideJson(Value)));
+			}
+		}
+
+		if (!bHasTypeFilter || TypeFilter == EMaterialInstanceOverrideType::Texture)
+		{
+			for (const FTextureParameterValue& Value : Instance->TextureParameterValues)
+			{
+				TextureOverrides.Add(MakeShared<FJsonValueObject>(BuildTextureOverrideJson(Value)));
+			}
+		}
+
+		FStaticParameterSet StaticParameters = Instance->GetStaticParameters();
+
+		if (!bHasTypeFilter || TypeFilter == EMaterialInstanceOverrideType::StaticSwitch)
+		{
+			for (const FStaticSwitchParameter& Value : StaticParameters.StaticSwitchParameters)
+			{
+				if (bIncludeStaticNonOverrides || Value.bOverride)
+				{
+					StaticSwitchOverrides.Add(MakeShared<FJsonValueObject>(BuildStaticSwitchOverrideJson(Value)));
+				}
+			}
+		}
+
+		if (!bHasTypeFilter || TypeFilter == EMaterialInstanceOverrideType::StaticComponentMask)
+		{
+			for (const FStaticComponentMaskParameter& Value : StaticParameters.EditorOnly.StaticComponentMaskParameters)
+			{
+				if (bIncludeStaticNonOverrides || Value.bOverride)
+				{
+					StaticComponentMaskOverrides.Add(MakeShared<FJsonValueObject>(BuildStaticComponentMaskOverrideJson(Value)));
+				}
+			}
+		}
+
+		const int32 TotalOverrideCount =
+			ScalarOverrides.Num() +
+			VectorOverrides.Num() +
+			TextureOverrides.Num() +
+			StaticSwitchOverrides.Num() +
+			StaticComponentMaskOverrides.Num();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_instance_path"), AssetPath);
+		Result->SetStringField(TEXT("parent_path"), Instance->Parent ? Instance->Parent->GetPathName() : FString());
+		if (bHasTypeFilter)
+		{
+			Result->SetStringField(TEXT("parameter_type_filter"), MaterialInstanceOverrideTypeToString(TypeFilter));
+		}
+		Result->SetBoolField(TEXT("include_static_non_overrides"), bIncludeStaticNonOverrides);
+		Result->SetArrayField(TEXT("scalar_overrides"), ScalarOverrides);
+		Result->SetArrayField(TEXT("vector_overrides"), VectorOverrides);
+		Result->SetArrayField(TEXT("texture_overrides"), TextureOverrides);
+		Result->SetArrayField(TEXT("static_switch_overrides"), StaticSwitchOverrides);
+		Result->SetArrayField(TEXT("static_component_mask_overrides"), StaticComponentMaskOverrides);
+		Result->SetNumberField(TEXT("scalar_override_count"), ScalarOverrides.Num());
+		Result->SetNumberField(TEXT("vector_override_count"), VectorOverrides.Num());
+		Result->SetNumberField(TEXT("texture_override_count"), TextureOverrides.Num());
+		Result->SetNumberField(TEXT("static_switch_override_count"), StaticSwitchOverrides.Num());
+		Result->SetNumberField(TEXT("static_component_mask_override_count"), StaticComponentMaskOverrides.Num());
+		Result->SetNumberField(TEXT("total_override_count"), TotalOverrideCount);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialInstanceClearOverride(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString MaterialInstancePath;
+	FString ParameterName;
+	if (!Request.Params->TryGetStringField(TEXT("material_instance_path"), MaterialInstancePath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_instance_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_name'"));
+	}
+	ParameterName = ParameterName.TrimStartAndEnd();
+	if (ParameterName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'parameter_name' cannot be empty"));
+	}
+
+	EMaterialParameterAssociation Association = EMaterialParameterAssociation::GlobalParameter;
+	int32 ParameterIndex = INDEX_NONE;
+	bool bHasAssociation = false;
+	bool bHasIndex = false;
+	FString AssociationError;
+	if (!ParseOptionalMaterialParameterAssociationAndIndex(Request.Params, Association, ParameterIndex, bHasAssociation, bHasIndex, AssociationError))
+	{
+		return InvalidParams(Request.Id, AssociationError);
+	}
+
+	EMaterialInstanceOverrideType TypeFilter = EMaterialInstanceOverrideType::Unknown;
+	bool bHasTypeFilter = false;
+	FString TypeError;
+	if (!ParseOptionalMaterialInstanceOverrideType(Request.Params, TypeFilter, bHasTypeFilter, TypeError))
+	{
+		return InvalidParams(Request.Id, TypeError);
+	}
+
+	auto Task = [MaterialInstancePath, ParameterName, bHasAssociation, Association, bHasIndex, ParameterIndex, bHasTypeFilter, TypeFilter]() -> TSharedPtr<FJsonObject>
+	{
+		FString AssetPath;
+		FString Error;
+		UMaterialInstanceConstant* Instance = ResolveMaterialInstance(MaterialInstancePath, AssetPath, Error);
+		if (!Instance)
+		{
+			return MakeFailure(Error);
+		}
+
+		bool bChanged = false;
+		bool bStaticChanged = false;
+		TArray<TSharedPtr<FJsonValue>> ClearedOverrides;
+
+		auto AddCleared = [&ClearedOverrides](const TSharedPtr<FJsonObject>& Override)
+		{
+			ClearedOverrides.Add(MakeShared<FJsonValueObject>(Override));
+		};
+
+		Instance->Modify();
+
+		if (!bHasTypeFilter || TypeFilter == EMaterialInstanceOverrideType::Scalar)
+		{
+			for (int32 Index = Instance->ScalarParameterValues.Num() - 1; Index >= 0; --Index)
+			{
+				const FScalarParameterValue& Value = Instance->ScalarParameterValues[Index];
+				if (MatchesMaterialParameterInfo(Value.ParameterInfo, ParameterName, bHasAssociation, Association, bHasIndex, ParameterIndex))
+				{
+					AddCleared(BuildScalarOverrideJson(Value));
+					Instance->ScalarParameterValues.RemoveAt(Index);
+					bChanged = true;
+				}
+			}
+		}
+
+		if (!bHasTypeFilter || TypeFilter == EMaterialInstanceOverrideType::Vector)
+		{
+			for (int32 Index = Instance->VectorParameterValues.Num() - 1; Index >= 0; --Index)
+			{
+				const FVectorParameterValue& Value = Instance->VectorParameterValues[Index];
+				if (MatchesMaterialParameterInfo(Value.ParameterInfo, ParameterName, bHasAssociation, Association, bHasIndex, ParameterIndex))
+				{
+					AddCleared(BuildVectorOverrideJson(Value));
+					Instance->VectorParameterValues.RemoveAt(Index);
+					bChanged = true;
+				}
+			}
+		}
+
+		if (!bHasTypeFilter || TypeFilter == EMaterialInstanceOverrideType::Texture)
+		{
+			for (int32 Index = Instance->TextureParameterValues.Num() - 1; Index >= 0; --Index)
+			{
+				const FTextureParameterValue& Value = Instance->TextureParameterValues[Index];
+				if (MatchesMaterialParameterInfo(Value.ParameterInfo, ParameterName, bHasAssociation, Association, bHasIndex, ParameterIndex))
+				{
+					AddCleared(BuildTextureOverrideJson(Value));
+					Instance->TextureParameterValues.RemoveAt(Index);
+					bChanged = true;
+				}
+			}
+		}
+
+		FStaticParameterSet StaticParameters = Instance->GetStaticParameters();
+
+		if (!bHasTypeFilter || TypeFilter == EMaterialInstanceOverrideType::StaticSwitch)
+		{
+			TMap<FMaterialParameterInfo, FMaterialParameterMetadata> ParentStaticSwitchValues;
+			if (Instance->Parent)
+			{
+				Instance->Parent->GetAllParametersOfType(EMaterialParameterType::StaticSwitch, ParentStaticSwitchValues);
+			}
+
+			for (FStaticSwitchParameter& Value : StaticParameters.StaticSwitchParameters)
+			{
+				if (!Value.bOverride)
+				{
+					continue;
+				}
+				if (!MatchesMaterialParameterInfo(Value.ParameterInfo, ParameterName, bHasAssociation, Association, bHasIndex, ParameterIndex))
+				{
+					continue;
+				}
+
+				AddCleared(BuildStaticSwitchOverrideJson(Value));
+				if (const FMaterialParameterMetadata* ParentMeta = ParentStaticSwitchValues.Find(Value.ParameterInfo))
+				{
+					if (ParentMeta->Value.Type == EMaterialParameterType::StaticSwitch)
+					{
+						Value.Value = ParentMeta->Value.AsStaticSwitch();
+					}
+				}
+				Value.bOverride = false;
+				bChanged = true;
+				bStaticChanged = true;
+			}
+		}
+
+		if (!bHasTypeFilter || TypeFilter == EMaterialInstanceOverrideType::StaticComponentMask)
+		{
+			TMap<FMaterialParameterInfo, FMaterialParameterMetadata> ParentStaticMaskValues;
+			if (Instance->Parent)
+			{
+				Instance->Parent->GetAllParametersOfType(EMaterialParameterType::StaticComponentMask, ParentStaticMaskValues);
+			}
+
+			for (FStaticComponentMaskParameter& Value : StaticParameters.EditorOnly.StaticComponentMaskParameters)
+			{
+				if (!Value.bOverride)
+				{
+					continue;
+				}
+				if (!MatchesMaterialParameterInfo(Value.ParameterInfo, ParameterName, bHasAssociation, Association, bHasIndex, ParameterIndex))
+				{
+					continue;
+				}
+
+				AddCleared(BuildStaticComponentMaskOverrideJson(Value));
+				if (const FMaterialParameterMetadata* ParentMeta = ParentStaticMaskValues.Find(Value.ParameterInfo))
+				{
+					if (ParentMeta->Value.Type == EMaterialParameterType::StaticComponentMask)
+					{
+						const FStaticComponentMaskValue ParentMask = ParentMeta->Value.AsStaticComponentMask();
+						Value.R = ParentMask.R;
+						Value.G = ParentMask.G;
+						Value.B = ParentMask.B;
+						Value.A = ParentMask.A;
+					}
+				}
+				Value.bOverride = false;
+				bChanged = true;
+				bStaticChanged = true;
+			}
+		}
+
+		if (bStaticChanged)
+		{
+			Instance->UpdateStaticPermutation(StaticParameters);
+		}
+
+		if (bChanged)
+		{
+			UMaterialEditingLibrary::UpdateMaterialInstance(Instance);
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_instance_path"), AssetPath);
+		Result->SetBoolField(TEXT("changed"), bChanged);
+		Result->SetArrayField(TEXT("cleared_overrides"), ClearedOverrides);
+		Result->SetNumberField(TEXT("cleared_count"), ClearedOverrides.Num());
+		if (bHasTypeFilter)
+		{
+			Result->SetStringField(TEXT("parameter_type"), MaterialInstanceOverrideTypeToString(TypeFilter));
+		}
+		if (bHasAssociation)
+		{
+			Result->SetStringField(TEXT("association"), MaterialParameterAssociationToString(Association));
+		}
+		if (bHasIndex)
+		{
+			Result->SetNumberField(TEXT("index"), ParameterIndex);
+		}
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialInstanceSetScalar(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString MaterialInstancePath;
+	FString ParameterName;
+	double ScalarValue = 0.0;
+	if (!Request.Params->TryGetStringField(TEXT("material_instance_path"), MaterialInstancePath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_instance_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_name'"));
+	}
+	if (!Request.Params->TryGetNumberField(TEXT("value"), ScalarValue))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required numeric parameter 'value'"));
+	}
+
+	EMaterialParameterAssociation Association = EMaterialParameterAssociation::GlobalParameter;
+	int32 ParameterIndex = INDEX_NONE;
+	FString AssociationError;
+	if (!ResolveMaterialParameterAssociationAndIndexForSet(Request.Params, Association, ParameterIndex, AssociationError))
+	{
+		return InvalidParams(Request.Id, AssociationError);
+	}
+
+	const FString TrimmedParameterName = ParameterName.TrimStartAndEnd();
+	if (TrimmedParameterName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'parameter_name' cannot be empty"));
+	}
+
+	auto Task = [MaterialInstancePath, TrimmedParameterName, ScalarValue, Association, ParameterIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FString AssetPath;
+		FString Error;
+		UMaterialInstanceConstant* Instance = ResolveMaterialInstance(MaterialInstancePath, AssetPath, Error);
+		if (!Instance)
+		{
+			return MakeFailure(Error);
+		}
+
+		const FMaterialParameterInfo ParameterInfo(FName(*TrimmedParameterName), Association, ParameterIndex);
+		Instance->Modify();
+		Instance->SetScalarParameterValueEditorOnly(ParameterInfo, static_cast<float>(ScalarValue));
+		UMaterialEditingLibrary::UpdateMaterialInstance(Instance);
+
+		const FScalarParameterValue* Override = Instance->ScalarParameterValues.FindByPredicate(
+			[&ParameterInfo](const FScalarParameterValue& Value)
+			{
+				return Value.ParameterInfo == ParameterInfo;
+			});
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_instance_path"), AssetPath);
+		Result->SetObjectField(TEXT("parameter_info"), BuildMaterialParameterInfoJson(ParameterInfo));
+		Result->SetNumberField(TEXT("value"), static_cast<float>(ScalarValue));
+		Result->SetBoolField(TEXT("override_found"), Override != nullptr);
+		if (Override)
+		{
+			Result->SetObjectField(TEXT("override"), BuildScalarOverrideJson(*Override));
+		}
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialInstanceSetVector(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString MaterialInstancePath;
+	FString ParameterName;
+	if (!Request.Params->TryGetStringField(TEXT("material_instance_path"), MaterialInstancePath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_instance_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_name'"));
+	}
+
+	FLinearColor VectorValue = FLinearColor::Black;
+	FString VectorParseError;
+	if (!TryReadLinearColor(Request.Params, TEXT("value"), VectorValue, VectorParseError))
+	{
+		return InvalidParams(Request.Id, VectorParseError);
+	}
+
+	EMaterialParameterAssociation Association = EMaterialParameterAssociation::GlobalParameter;
+	int32 ParameterIndex = INDEX_NONE;
+	FString AssociationError;
+	if (!ResolveMaterialParameterAssociationAndIndexForSet(Request.Params, Association, ParameterIndex, AssociationError))
+	{
+		return InvalidParams(Request.Id, AssociationError);
+	}
+
+	const FString TrimmedParameterName = ParameterName.TrimStartAndEnd();
+	if (TrimmedParameterName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'parameter_name' cannot be empty"));
+	}
+
+	auto Task = [MaterialInstancePath, TrimmedParameterName, VectorValue, Association, ParameterIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FString AssetPath;
+		FString Error;
+		UMaterialInstanceConstant* Instance = ResolveMaterialInstance(MaterialInstancePath, AssetPath, Error);
+		if (!Instance)
+		{
+			return MakeFailure(Error);
+		}
+
+		const FMaterialParameterInfo ParameterInfo(FName(*TrimmedParameterName), Association, ParameterIndex);
+		Instance->Modify();
+		Instance->SetVectorParameterValueEditorOnly(ParameterInfo, VectorValue);
+		UMaterialEditingLibrary::UpdateMaterialInstance(Instance);
+
+		const FVectorParameterValue* Override = Instance->VectorParameterValues.FindByPredicate(
+			[&ParameterInfo](const FVectorParameterValue& Value)
+			{
+				return Value.ParameterInfo == ParameterInfo;
+			});
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_instance_path"), AssetPath);
+		Result->SetObjectField(TEXT("parameter_info"), BuildMaterialParameterInfoJson(ParameterInfo));
+		Result->SetObjectField(TEXT("value"), BuildColorJson(VectorValue));
+		Result->SetBoolField(TEXT("override_found"), Override != nullptr);
+		if (Override)
+		{
+			Result->SetObjectField(TEXT("override"), BuildVectorOverrideJson(*Override));
+		}
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialInstanceSetTexture(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString MaterialInstancePath;
+	FString ParameterName;
+	if (!Request.Params->TryGetStringField(TEXT("material_instance_path"), MaterialInstancePath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_instance_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_name'"));
+	}
+
+	FString TexturePath;
+	if (!Request.Params->TryGetStringField(TEXT("texture_path"), TexturePath))
+	{
+		Request.Params->TryGetStringField(TEXT("value"), TexturePath);
+	}
+	if (!Request.Params->HasField(TEXT("texture_path")) && !Request.Params->HasField(TEXT("value")))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'texture_path' (or 'value')"));
+	}
+
+	EMaterialParameterAssociation Association = EMaterialParameterAssociation::GlobalParameter;
+	int32 ParameterIndex = INDEX_NONE;
+	FString AssociationError;
+	if (!ResolveMaterialParameterAssociationAndIndexForSet(Request.Params, Association, ParameterIndex, AssociationError))
+	{
+		return InvalidParams(Request.Id, AssociationError);
+	}
+
+	const FString TrimmedParameterName = ParameterName.TrimStartAndEnd();
+	if (TrimmedParameterName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'parameter_name' cannot be empty"));
+	}
+
+	auto Task = [MaterialInstancePath, TrimmedParameterName, TexturePath, Association, ParameterIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FString AssetPath;
+		FString Error;
+		UMaterialInstanceConstant* Instance = ResolveMaterialInstance(MaterialInstancePath, AssetPath, Error);
+		if (!Instance)
+		{
+			return MakeFailure(Error);
+		}
+
+		UTexture* Texture = nullptr;
+		const FString TrimmedTexturePath = TexturePath.TrimStartAndEnd();
+		if (!TrimmedTexturePath.IsEmpty())
+		{
+			Texture = LoadAssetAs<UTexture>(TrimmedTexturePath);
+			if (!Texture)
+			{
+				return MakeFailure(FString::Printf(TEXT("Texture asset not found: %s"), *TrimmedTexturePath));
+			}
+		}
+
+		const FMaterialParameterInfo ParameterInfo(FName(*TrimmedParameterName), Association, ParameterIndex);
+		Instance->Modify();
+		Instance->SetTextureParameterValueEditorOnly(ParameterInfo, Texture);
+		UMaterialEditingLibrary::UpdateMaterialInstance(Instance);
+
+		const FTextureParameterValue* Override = Instance->TextureParameterValues.FindByPredicate(
+			[&ParameterInfo](const FTextureParameterValue& Value)
+			{
+				return Value.ParameterInfo == ParameterInfo;
+			});
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_instance_path"), AssetPath);
+		Result->SetObjectField(TEXT("parameter_info"), BuildMaterialParameterInfoJson(ParameterInfo));
+		Result->SetStringField(TEXT("value"), Texture ? Texture->GetPathName() : FString());
+		Result->SetBoolField(TEXT("override_found"), Override != nullptr);
+		if (Override)
+		{
+			Result->SetObjectField(TEXT("override"), BuildTextureOverrideJson(*Override));
+		}
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialInstanceSetStaticSwitch(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString MaterialInstancePath;
+	FString ParameterName;
+	bool bValue = false;
+	if (!Request.Params->TryGetStringField(TEXT("material_instance_path"), MaterialInstancePath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_instance_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_name'"));
+	}
+	if (!Request.Params->TryGetBoolField(TEXT("value"), bValue))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required boolean parameter 'value'"));
+	}
+
+	EMaterialParameterAssociation Association = EMaterialParameterAssociation::GlobalParameter;
+	int32 ParameterIndex = INDEX_NONE;
+	FString AssociationError;
+	if (!ResolveMaterialParameterAssociationAndIndexForSet(Request.Params, Association, ParameterIndex, AssociationError))
+	{
+		return InvalidParams(Request.Id, AssociationError);
+	}
+
+	const FString TrimmedParameterName = ParameterName.TrimStartAndEnd();
+	if (TrimmedParameterName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'parameter_name' cannot be empty"));
+	}
+
+	auto Task = [MaterialInstancePath, TrimmedParameterName, bValue, Association, ParameterIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FString AssetPath;
+		FString Error;
+		UMaterialInstanceConstant* Instance = ResolveMaterialInstance(MaterialInstancePath, AssetPath, Error);
+		if (!Instance)
+		{
+			return MakeFailure(Error);
+		}
+
+		const FMaterialParameterInfo ParameterInfo(FName(*TrimmedParameterName), Association, ParameterIndex);
+		FStaticParameterSet StaticParameters = Instance->GetStaticParameters();
+
+		bool bFound = false;
+		for (FStaticSwitchParameter& StaticSwitch : StaticParameters.StaticSwitchParameters)
+		{
+			if (StaticSwitch.ParameterInfo == ParameterInfo)
+			{
+				StaticSwitch.Value = bValue;
+				StaticSwitch.bOverride = true;
+				bFound = true;
+				break;
+			}
+		}
+
+		if (!bFound)
+		{
+			StaticParameters.StaticSwitchParameters.Emplace(ParameterInfo, bValue, true, FGuid());
+		}
+
+		Instance->Modify();
+		Instance->UpdateStaticPermutation(StaticParameters);
+		UMaterialEditingLibrary::UpdateMaterialInstance(Instance);
+
+		const FStaticSwitchParameter* Override = StaticParameters.StaticSwitchParameters.FindByPredicate(
+			[&ParameterInfo](const FStaticSwitchParameter& Value)
+			{
+				return Value.ParameterInfo == ParameterInfo;
+			});
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_instance_path"), AssetPath);
+		Result->SetObjectField(TEXT("parameter_info"), BuildMaterialParameterInfoJson(ParameterInfo));
+		Result->SetBoolField(TEXT("value"), bValue);
+		Result->SetBoolField(TEXT("override_found"), Override != nullptr);
+		if (Override)
+		{
+			Result->SetObjectField(TEXT("override"), BuildStaticSwitchOverrideJson(*Override));
+		}
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialInstanceSetStaticComponentMask(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString MaterialInstancePath;
+	FString ParameterName;
+	if (!Request.Params->TryGetStringField(TEXT("material_instance_path"), MaterialInstancePath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_instance_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_name'"));
+	}
+
+	bool bR = false;
+	bool bG = false;
+	bool bB = false;
+	bool bA = false;
+	FString MaskParseError;
+	if (!TryReadMaterialInstanceMaskValue(Request.Params, bR, bG, bB, bA, MaskParseError))
+	{
+		return InvalidParams(Request.Id, MaskParseError);
+	}
+
+	EMaterialParameterAssociation Association = EMaterialParameterAssociation::GlobalParameter;
+	int32 ParameterIndex = INDEX_NONE;
+	FString AssociationError;
+	if (!ResolveMaterialParameterAssociationAndIndexForSet(Request.Params, Association, ParameterIndex, AssociationError))
+	{
+		return InvalidParams(Request.Id, AssociationError);
+	}
+
+	const FString TrimmedParameterName = ParameterName.TrimStartAndEnd();
+	if (TrimmedParameterName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'parameter_name' cannot be empty"));
+	}
+
+	auto Task = [MaterialInstancePath, TrimmedParameterName, bR, bG, bB, bA, Association, ParameterIndex]() -> TSharedPtr<FJsonObject>
+	{
+		FString AssetPath;
+		FString Error;
+		UMaterialInstanceConstant* Instance = ResolveMaterialInstance(MaterialInstancePath, AssetPath, Error);
+		if (!Instance)
+		{
+			return MakeFailure(Error);
+		}
+
+		const FMaterialParameterInfo ParameterInfo(FName(*TrimmedParameterName), Association, ParameterIndex);
+		FStaticParameterSet StaticParameters = Instance->GetStaticParameters();
+
+		bool bFound = false;
+		for (FStaticComponentMaskParameter& StaticMask : StaticParameters.EditorOnly.StaticComponentMaskParameters)
+		{
+			if (StaticMask.ParameterInfo == ParameterInfo)
+			{
+				StaticMask.R = bR;
+				StaticMask.G = bG;
+				StaticMask.B = bB;
+				StaticMask.A = bA;
+				StaticMask.bOverride = true;
+				bFound = true;
+				break;
+			}
+		}
+
+		if (!bFound)
+		{
+			StaticParameters.EditorOnly.StaticComponentMaskParameters.Emplace(ParameterInfo, bR, bG, bB, bA, true, FGuid());
+		}
+
+		Instance->Modify();
+		Instance->UpdateStaticPermutation(StaticParameters);
+		UMaterialEditingLibrary::UpdateMaterialInstance(Instance);
+
+		const FStaticComponentMaskParameter* Override = StaticParameters.EditorOnly.StaticComponentMaskParameters.FindByPredicate(
+			[&ParameterInfo](const FStaticComponentMaskParameter& Value)
+			{
+				return Value.ParameterInfo == ParameterInfo;
+			});
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_instance_path"), AssetPath);
+		Result->SetObjectField(TEXT("parameter_info"), BuildMaterialParameterInfoJson(ParameterInfo));
+		Result->SetObjectField(TEXT("value"), BuildMaskJson(bR, bG, bB, bA));
+		Result->SetBoolField(TEXT("override_found"), Override != nullptr);
+		if (Override)
+		{
+			Result->SetObjectField(TEXT("override"), BuildStaticComponentMaskOverrideJson(*Override));
+		}
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleMaterialInstanceCopyOverridesFromInstance(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString DestinationPath;
+	FString SourcePath;
+	if (!Request.Params->TryGetStringField(TEXT("material_instance_path"), DestinationPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'material_instance_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("source_material_instance_path"), SourcePath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'source_material_instance_path'"));
+	}
+
+	auto Task = [DestinationPath, SourcePath]() -> TSharedPtr<FJsonObject>
+	{
+		FString DestinationAssetPath;
+		FString Error;
+		UMaterialInstanceConstant* Destination = ResolveMaterialInstance(DestinationPath, DestinationAssetPath, Error);
+		if (!Destination)
+		{
+			return MakeFailure(Error);
+		}
+
+		FString SourceAssetPath;
+		UMaterialInstanceConstant* Source = ResolveMaterialInstance(SourcePath, SourceAssetPath, Error);
+		if (!Source)
+		{
+			return MakeFailure(Error);
+		}
+
+		if (Destination == Source)
+		{
+			TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("material_instance_path"), DestinationAssetPath);
+			Result->SetStringField(TEXT("source_material_instance_path"), SourceAssetPath);
+			Result->SetBoolField(TEXT("changed"), false);
+			return Result;
+		}
+
+		Destination->Modify();
+		Destination->CopyMaterialUniformParametersEditorOnly(Source, true);
+		UMaterialEditingLibrary::UpdateMaterialInstance(Destination);
+
+		FStaticParameterSet StaticParameters = Destination->GetStaticParameters();
+		int32 StaticSwitchOverrideCount = 0;
+		for (const FStaticSwitchParameter& StaticSwitch : StaticParameters.StaticSwitchParameters)
+		{
+			if (StaticSwitch.bOverride)
+			{
+				++StaticSwitchOverrideCount;
+			}
+		}
+
+		int32 StaticMaskOverrideCount = 0;
+		for (const FStaticComponentMaskParameter& StaticMask : StaticParameters.EditorOnly.StaticComponentMaskParameters)
+		{
+			if (StaticMask.bOverride)
+			{
+				++StaticMaskOverrideCount;
+			}
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("material_instance_path"), DestinationAssetPath);
+		Result->SetStringField(TEXT("source_material_instance_path"), SourceAssetPath);
+		Result->SetBoolField(TEXT("changed"), true);
+		Result->SetNumberField(TEXT("scalar_override_count"), Destination->ScalarParameterValues.Num());
+		Result->SetNumberField(TEXT("vector_override_count"), Destination->VectorParameterValues.Num());
+		Result->SetNumberField(TEXT("texture_override_count"), Destination->TextureParameterValues.Num());
+		Result->SetNumberField(TEXT("static_switch_override_count"), StaticSwitchOverrideCount);
+		Result->SetNumberField(TEXT("static_component_mask_override_count"), StaticMaskOverrideCount);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
 FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 {
 	auto Task = []() -> TSharedPtr<FJsonObject>
@@ -5104,6 +6374,7 @@ FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 		PhasesObj->SetBoolField(TEXT("phase_3_pin_wiring_operations"), true);
 		PhasesObj->SetBoolField(TEXT("phase_4_material_output_authoring"), true);
 		PhasesObj->SetBoolField(TEXT("phase_5_parameter_authoring"), true);
+		PhasesObj->SetBoolField(TEXT("phase_6_material_instance_support"), true);
 		Result->SetObjectField(TEXT("phases"), PhasesObj);
 
 		TSharedPtr<FJsonObject> DependenciesObj = MakeShared<FJsonObject>();
