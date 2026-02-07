@@ -2609,6 +2609,37 @@ namespace
 	}
 }
 
+static FMCPResponse FinalizeBlueprintToolResponse(FMCPResponse Response, const FString& MethodName)
+{
+	if (!Response.bSuccess)
+	{
+		return Response;
+	}
+
+	if (!Response.Result.IsValid())
+	{
+		Response.Result = MakeShared<FJsonObject>();
+	}
+
+	bool bOperationSuccess = true;
+	if (!Response.Result->TryGetBoolField(TEXT("success"), bOperationSuccess))
+	{
+		Response.Result->SetBoolField(TEXT("success"), true);
+		bOperationSuccess = true;
+	}
+
+	if (!bOperationSuccess)
+	{
+		FString ErrorMessage;
+		if (!Response.Result->TryGetStringField(TEXT("error"), ErrorMessage) || ErrorMessage.TrimStartAndEnd().IsEmpty())
+		{
+			Response.Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint tool '%s' failed"), *MethodName));
+		}
+	}
+
+	return Response;
+}
+
 FBlueprintService::FBlueprintService()
 {
 }
@@ -5369,104 +5400,109 @@ TArray<FMCPToolInfo> FBlueprintService::GetAvailableTools() const
 
 FMCPResponse FBlueprintService::HandleRequest(const FMCPRequest& Request, const FString& MethodName)
 {
-	if (MethodName == TEXT("create_blueprint")) return HandleCreateBlueprint(Request);
-	if (MethodName == TEXT("list_blueprints")) return HandleListBlueprints(Request);
-	if (MethodName == TEXT("duplicate_blueprint")) return HandleDuplicateBlueprint(Request);
-	if (MethodName == TEXT("rename_blueprint")) return HandleRenameBlueprint(Request);
-	if (MethodName == TEXT("delete_blueprint")) return HandleDeleteBlueprint(Request);
-	if (MethodName == TEXT("save_blueprint")) return HandleSaveBlueprint(Request);
-	if (MethodName == TEXT("reparent_blueprint")) return HandleReparentBlueprint(Request);
-	if (MethodName == TEXT("get_blueprint_info")) return HandleGetBlueprintInfo(Request);
-	if (MethodName == TEXT("set_class_settings")) return HandleSetClassSettings(Request);
-	if (MethodName == TEXT("list_graphs")) return HandleListGraphs(Request);
-	if (MethodName == TEXT("create_graph")) return HandleCreateGraph(Request);
-	if (MethodName == TEXT("rename_graph")) return HandleRenameGraph(Request);
-	if (MethodName == TEXT("delete_graph")) return HandleDeleteGraph(Request);
-	if (MethodName == TEXT("set_graph_metadata")) return HandleSetGraphMetadata(Request);
-	if (MethodName == TEXT("format_graph")) return HandleFormatGraph(Request);
-	if (MethodName == TEXT("list_graph_nodes")) return HandleListGraphNodes(Request);
-	if (MethodName == TEXT("create_variable")) return HandleCreateVariable(Request);
-	if (MethodName == TEXT("list_variables")) return HandleListVariables(Request);
-	if (MethodName == TEXT("rename_variable")) return HandleRenameVariable(Request);
-	if (MethodName == TEXT("delete_variable")) return HandleDeleteVariable(Request);
-	if (MethodName == TEXT("set_variable_default")) return HandleSetVariableDefault(Request);
-	if (MethodName == TEXT("set_variable_metadata")) return HandleSetVariableMetadata(Request);
-	if (MethodName == TEXT("set_variable_instance_editable")) return HandleSetVariableInstanceEditable(Request);
-	if (MethodName == TEXT("set_variable_expose_on_spawn")) return HandleSetVariableExposeOnSpawn(Request);
-	if (MethodName == TEXT("set_variable_savegame")) return HandleSetVariableSaveGame(Request);
-	if (MethodName == TEXT("set_variable_transient")) return HandleSetVariableTransient(Request);
-	if (MethodName == TEXT("set_variable_replication")) return HandleSetVariableReplication(Request);
-	if (MethodName == TEXT("list_components")) return HandleListComponents(Request);
-	if (MethodName == TEXT("add_component")) return HandleAddComponent(Request);
-	if (MethodName == TEXT("remove_component")) return HandleRemoveComponent(Request);
-	if (MethodName == TEXT("rename_component")) return HandleRenameComponent(Request);
-	if (MethodName == TEXT("set_root_component")) return HandleSetRootComponent(Request);
-	if (MethodName == TEXT("attach_component")) return HandleAttachComponent(Request);
-	if (MethodName == TEXT("detach_component")) return HandleDetachComponent(Request);
-	if (MethodName == TEXT("set_component_property")) return HandleSetComponentProperty(Request);
-	if (MethodName == TEXT("get_component_property")) return HandleGetComponentProperty(Request);
-	if (MethodName == TEXT("set_component_transform_default")) return HandleSetComponentTransformDefault(Request);
-	if (MethodName == TEXT("list_functions")) return HandleListFunctions(Request);
-	if (MethodName == TEXT("create_function")) return HandleCreateFunction(Request);
-	if (MethodName == TEXT("delete_function")) return HandleDeleteFunction(Request);
-	if (MethodName == TEXT("rename_function")) return HandleRenameFunction(Request);
-	if (MethodName == TEXT("set_function_flags")) return HandleSetFunctionFlags(Request);
-	if (MethodName == TEXT("add_function_param")) return HandleAddFunctionParam(Request);
-	if (MethodName == TEXT("remove_function_param")) return HandleRemoveFunctionParam(Request);
-	if (MethodName == TEXT("set_function_return")) return HandleSetFunctionReturn(Request);
-	if (MethodName == TEXT("list_macros")) return HandleListMacros(Request);
-	if (MethodName == TEXT("create_macro")) return HandleCreateMacro(Request);
-	if (MethodName == TEXT("delete_macro")) return HandleDeleteMacro(Request);
-	if (MethodName == TEXT("list_event_dispatchers")) return HandleListEventDispatchers(Request);
-	if (MethodName == TEXT("create_event_dispatcher")) return HandleCreateEventDispatcher(Request);
-	if (MethodName == TEXT("set_dispatcher_signature")) return HandleSetDispatcherSignature(Request);
-	if (MethodName == TEXT("add_event_node")) return HandleAddEventNode(Request);
-	if (MethodName == TEXT("add_call_function_node")) return HandleAddCallFunctionNode(Request);
-	if (MethodName == TEXT("add_variable_get_node")) return HandleAddVariableGetNode(Request);
-	if (MethodName == TEXT("add_variable_set_node")) return HandleAddVariableSetNode(Request);
-	if (MethodName == TEXT("add_node_by_class")) return HandleAddNodeByClass(Request);
-	if (MethodName == TEXT("add_custom_event_node")) return HandleAddCustomEventNode(Request);
-	if (MethodName == TEXT("add_comment_node")) return HandleAddCommentNode(Request);
-	if (MethodName == TEXT("add_reroute_node")) return HandleAddRerouteNode(Request);
-	if (MethodName == TEXT("delete_node")) return HandleDeleteNode(Request);
-	if (MethodName == TEXT("duplicate_node")) return HandleDuplicateNode(Request);
-	if (MethodName == TEXT("move_node")) return HandleMoveNode(Request);
-	if (MethodName == TEXT("rename_node")) return HandleRenameNode(Request);
-	if (MethodName == TEXT("set_node_comment")) return HandleSetNodeComment(Request);
-	if (MethodName == TEXT("collapse_nodes_to_function")) return HandleCollapseNodesToFunction(Request);
-	if (MethodName == TEXT("collapse_nodes_to_macro")) return HandleCollapseNodesToMacro(Request);
-	if (MethodName == TEXT("list_node_pins")) return HandleListNodePins(Request);
-	if (MethodName == TEXT("disconnect_pins")) return HandleDisconnectPins(Request);
-	if (MethodName == TEXT("break_pin_links")) return HandleBreakPinLinks(Request);
-	if (MethodName == TEXT("break_all_node_links")) return HandleBreakAllNodeLinks(Request);
-	if (MethodName == TEXT("reset_pin_default_value")) return HandleResetPinDefaultValue(Request);
-	if (MethodName == TEXT("split_struct_pin")) return HandleSplitStructPin(Request);
-	if (MethodName == TEXT("recombine_struct_pin")) return HandleRecombineStructPin(Request);
-	if (MethodName == TEXT("promote_pin_to_variable")) return HandlePromotePinToVariable(Request);
-	if (MethodName == TEXT("find_references")) return HandleFindReferences(Request);
-	if (MethodName == TEXT("rename_symbol")) return HandleRenameSymbol(Request);
-	if (MethodName == TEXT("replace_function_calls")) return HandleReplaceFunctionCalls(Request);
-	if (MethodName == TEXT("remove_unused_variables")) return HandleRemoveUnusedVariables(Request);
-	if (MethodName == TEXT("remove_unused_functions")) return HandleRemoveUnusedFunctions(Request);
-	if (MethodName == TEXT("get_compile_result")) return HandleGetCompileResult(Request);
-	if (MethodName == TEXT("validate_blueprint")) return HandleValidateBlueprint(Request);
-	if (MethodName == TEXT("refresh_all_nodes")) return HandleRefreshAllNodes(Request);
-	if (MethodName == TEXT("get_blueprint_status")) return HandleGetBlueprintStatus(Request);
-	if (MethodName == TEXT("list_blueprint_warnings")) return HandleListBlueprintWarnings(Request);
-	if (MethodName == TEXT("list_interfaces")) return HandleListInterfaces(Request);
-	if (MethodName == TEXT("add_interface")) return HandleAddInterface(Request);
-	if (MethodName == TEXT("remove_interface")) return HandleRemoveInterface(Request);
-	if (MethodName == TEXT("list_overridable_functions")) return HandleListOverridableFunctions(Request);
-	if (MethodName == TEXT("override_function")) return HandleOverrideFunction(Request);
-	if (MethodName == TEXT("implement_interface_function")) return HandleImplementInterfaceFunction(Request);
-	if (MethodName == TEXT("begin_transaction")) return HandleBeginTransaction(Request);
-	if (MethodName == TEXT("end_transaction")) return HandleEndTransaction(Request);
-	if (MethodName == TEXT("cancel_transaction")) return HandleCancelTransaction(Request);
-	if (MethodName == TEXT("dry_run_validate")) return HandleDryRunValidate(Request);
-	if (MethodName == TEXT("capabilities")) return HandleCapabilities(Request);
-	if (MethodName == TEXT("set_pin_default_value")) return HandleSetPinDefaultValue(Request);
-	if (MethodName == TEXT("connect_pins")) return HandleConnectPins(Request);
-	if (MethodName == TEXT("compile_blueprint")) return HandleCompileBlueprint(Request);
+	auto Finalize = [&MethodName](FMCPResponse Response) -> FMCPResponse
+	{
+		return FinalizeBlueprintToolResponse(MoveTemp(Response), MethodName);
+	};
+
+	if (MethodName == TEXT("create_blueprint")) return Finalize(HandleCreateBlueprint(Request));
+	if (MethodName == TEXT("list_blueprints")) return Finalize(HandleListBlueprints(Request));
+	if (MethodName == TEXT("duplicate_blueprint")) return Finalize(HandleDuplicateBlueprint(Request));
+	if (MethodName == TEXT("rename_blueprint")) return Finalize(HandleRenameBlueprint(Request));
+	if (MethodName == TEXT("delete_blueprint")) return Finalize(HandleDeleteBlueprint(Request));
+	if (MethodName == TEXT("save_blueprint")) return Finalize(HandleSaveBlueprint(Request));
+	if (MethodName == TEXT("reparent_blueprint")) return Finalize(HandleReparentBlueprint(Request));
+	if (MethodName == TEXT("get_blueprint_info")) return Finalize(HandleGetBlueprintInfo(Request));
+	if (MethodName == TEXT("set_class_settings")) return Finalize(HandleSetClassSettings(Request));
+	if (MethodName == TEXT("list_graphs")) return Finalize(HandleListGraphs(Request));
+	if (MethodName == TEXT("create_graph")) return Finalize(HandleCreateGraph(Request));
+	if (MethodName == TEXT("rename_graph")) return Finalize(HandleRenameGraph(Request));
+	if (MethodName == TEXT("delete_graph")) return Finalize(HandleDeleteGraph(Request));
+	if (MethodName == TEXT("set_graph_metadata")) return Finalize(HandleSetGraphMetadata(Request));
+	if (MethodName == TEXT("format_graph")) return Finalize(HandleFormatGraph(Request));
+	if (MethodName == TEXT("list_graph_nodes")) return Finalize(HandleListGraphNodes(Request));
+	if (MethodName == TEXT("create_variable")) return Finalize(HandleCreateVariable(Request));
+	if (MethodName == TEXT("list_variables")) return Finalize(HandleListVariables(Request));
+	if (MethodName == TEXT("rename_variable")) return Finalize(HandleRenameVariable(Request));
+	if (MethodName == TEXT("delete_variable")) return Finalize(HandleDeleteVariable(Request));
+	if (MethodName == TEXT("set_variable_default")) return Finalize(HandleSetVariableDefault(Request));
+	if (MethodName == TEXT("set_variable_metadata")) return Finalize(HandleSetVariableMetadata(Request));
+	if (MethodName == TEXT("set_variable_instance_editable")) return Finalize(HandleSetVariableInstanceEditable(Request));
+	if (MethodName == TEXT("set_variable_expose_on_spawn")) return Finalize(HandleSetVariableExposeOnSpawn(Request));
+	if (MethodName == TEXT("set_variable_savegame")) return Finalize(HandleSetVariableSaveGame(Request));
+	if (MethodName == TEXT("set_variable_transient")) return Finalize(HandleSetVariableTransient(Request));
+	if (MethodName == TEXT("set_variable_replication")) return Finalize(HandleSetVariableReplication(Request));
+	if (MethodName == TEXT("list_components")) return Finalize(HandleListComponents(Request));
+	if (MethodName == TEXT("add_component")) return Finalize(HandleAddComponent(Request));
+	if (MethodName == TEXT("remove_component")) return Finalize(HandleRemoveComponent(Request));
+	if (MethodName == TEXT("rename_component")) return Finalize(HandleRenameComponent(Request));
+	if (MethodName == TEXT("set_root_component")) return Finalize(HandleSetRootComponent(Request));
+	if (MethodName == TEXT("attach_component")) return Finalize(HandleAttachComponent(Request));
+	if (MethodName == TEXT("detach_component")) return Finalize(HandleDetachComponent(Request));
+	if (MethodName == TEXT("set_component_property")) return Finalize(HandleSetComponentProperty(Request));
+	if (MethodName == TEXT("get_component_property")) return Finalize(HandleGetComponentProperty(Request));
+	if (MethodName == TEXT("set_component_transform_default")) return Finalize(HandleSetComponentTransformDefault(Request));
+	if (MethodName == TEXT("list_functions")) return Finalize(HandleListFunctions(Request));
+	if (MethodName == TEXT("create_function")) return Finalize(HandleCreateFunction(Request));
+	if (MethodName == TEXT("delete_function")) return Finalize(HandleDeleteFunction(Request));
+	if (MethodName == TEXT("rename_function")) return Finalize(HandleRenameFunction(Request));
+	if (MethodName == TEXT("set_function_flags")) return Finalize(HandleSetFunctionFlags(Request));
+	if (MethodName == TEXT("add_function_param")) return Finalize(HandleAddFunctionParam(Request));
+	if (MethodName == TEXT("remove_function_param")) return Finalize(HandleRemoveFunctionParam(Request));
+	if (MethodName == TEXT("set_function_return")) return Finalize(HandleSetFunctionReturn(Request));
+	if (MethodName == TEXT("list_macros")) return Finalize(HandleListMacros(Request));
+	if (MethodName == TEXT("create_macro")) return Finalize(HandleCreateMacro(Request));
+	if (MethodName == TEXT("delete_macro")) return Finalize(HandleDeleteMacro(Request));
+	if (MethodName == TEXT("list_event_dispatchers")) return Finalize(HandleListEventDispatchers(Request));
+	if (MethodName == TEXT("create_event_dispatcher")) return Finalize(HandleCreateEventDispatcher(Request));
+	if (MethodName == TEXT("set_dispatcher_signature")) return Finalize(HandleSetDispatcherSignature(Request));
+	if (MethodName == TEXT("add_event_node")) return Finalize(HandleAddEventNode(Request));
+	if (MethodName == TEXT("add_call_function_node")) return Finalize(HandleAddCallFunctionNode(Request));
+	if (MethodName == TEXT("add_variable_get_node")) return Finalize(HandleAddVariableGetNode(Request));
+	if (MethodName == TEXT("add_variable_set_node")) return Finalize(HandleAddVariableSetNode(Request));
+	if (MethodName == TEXT("add_node_by_class")) return Finalize(HandleAddNodeByClass(Request));
+	if (MethodName == TEXT("add_custom_event_node")) return Finalize(HandleAddCustomEventNode(Request));
+	if (MethodName == TEXT("add_comment_node")) return Finalize(HandleAddCommentNode(Request));
+	if (MethodName == TEXT("add_reroute_node")) return Finalize(HandleAddRerouteNode(Request));
+	if (MethodName == TEXT("delete_node")) return Finalize(HandleDeleteNode(Request));
+	if (MethodName == TEXT("duplicate_node")) return Finalize(HandleDuplicateNode(Request));
+	if (MethodName == TEXT("move_node")) return Finalize(HandleMoveNode(Request));
+	if (MethodName == TEXT("rename_node")) return Finalize(HandleRenameNode(Request));
+	if (MethodName == TEXT("set_node_comment")) return Finalize(HandleSetNodeComment(Request));
+	if (MethodName == TEXT("collapse_nodes_to_function")) return Finalize(HandleCollapseNodesToFunction(Request));
+	if (MethodName == TEXT("collapse_nodes_to_macro")) return Finalize(HandleCollapseNodesToMacro(Request));
+	if (MethodName == TEXT("list_node_pins")) return Finalize(HandleListNodePins(Request));
+	if (MethodName == TEXT("disconnect_pins")) return Finalize(HandleDisconnectPins(Request));
+	if (MethodName == TEXT("break_pin_links")) return Finalize(HandleBreakPinLinks(Request));
+	if (MethodName == TEXT("break_all_node_links")) return Finalize(HandleBreakAllNodeLinks(Request));
+	if (MethodName == TEXT("reset_pin_default_value")) return Finalize(HandleResetPinDefaultValue(Request));
+	if (MethodName == TEXT("split_struct_pin")) return Finalize(HandleSplitStructPin(Request));
+	if (MethodName == TEXT("recombine_struct_pin")) return Finalize(HandleRecombineStructPin(Request));
+	if (MethodName == TEXT("promote_pin_to_variable")) return Finalize(HandlePromotePinToVariable(Request));
+	if (MethodName == TEXT("find_references")) return Finalize(HandleFindReferences(Request));
+	if (MethodName == TEXT("rename_symbol")) return Finalize(HandleRenameSymbol(Request));
+	if (MethodName == TEXT("replace_function_calls")) return Finalize(HandleReplaceFunctionCalls(Request));
+	if (MethodName == TEXT("remove_unused_variables")) return Finalize(HandleRemoveUnusedVariables(Request));
+	if (MethodName == TEXT("remove_unused_functions")) return Finalize(HandleRemoveUnusedFunctions(Request));
+	if (MethodName == TEXT("get_compile_result")) return Finalize(HandleGetCompileResult(Request));
+	if (MethodName == TEXT("validate_blueprint")) return Finalize(HandleValidateBlueprint(Request));
+	if (MethodName == TEXT("refresh_all_nodes")) return Finalize(HandleRefreshAllNodes(Request));
+	if (MethodName == TEXT("get_blueprint_status")) return Finalize(HandleGetBlueprintStatus(Request));
+	if (MethodName == TEXT("list_blueprint_warnings")) return Finalize(HandleListBlueprintWarnings(Request));
+	if (MethodName == TEXT("list_interfaces")) return Finalize(HandleListInterfaces(Request));
+	if (MethodName == TEXT("add_interface")) return Finalize(HandleAddInterface(Request));
+	if (MethodName == TEXT("remove_interface")) return Finalize(HandleRemoveInterface(Request));
+	if (MethodName == TEXT("list_overridable_functions")) return Finalize(HandleListOverridableFunctions(Request));
+	if (MethodName == TEXT("override_function")) return Finalize(HandleOverrideFunction(Request));
+	if (MethodName == TEXT("implement_interface_function")) return Finalize(HandleImplementInterfaceFunction(Request));
+	if (MethodName == TEXT("begin_transaction")) return Finalize(HandleBeginTransaction(Request));
+	if (MethodName == TEXT("end_transaction")) return Finalize(HandleEndTransaction(Request));
+	if (MethodName == TEXT("cancel_transaction")) return Finalize(HandleCancelTransaction(Request));
+	if (MethodName == TEXT("dry_run_validate")) return Finalize(HandleDryRunValidate(Request));
+	if (MethodName == TEXT("capabilities")) return Finalize(HandleCapabilities(Request));
+	if (MethodName == TEXT("set_pin_default_value")) return Finalize(HandleSetPinDefaultValue(Request));
+	if (MethodName == TEXT("connect_pins")) return Finalize(HandleConnectPins(Request));
+	if (MethodName == TEXT("compile_blueprint")) return Finalize(HandleCompileBlueprint(Request));
 
 	return MethodNotFound(Request.Id, TEXT("blueprint"), MethodName);
 }
