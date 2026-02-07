@@ -52,5 +52,12 @@ private:
 	FMCPResponse HandleListConnectedOutputs(const FMCPRequest& Request);
 	FMCPResponse HandleSetCustomUVOutput(const FMCPRequest& Request);
 	FMCPResponse HandleSetPixelDepthOffsetOutput(const FMCPRequest& Request);
+	FMCPResponse HandleListParameters(const FMCPRequest& Request);
+	FMCPResponse HandleAddParameter(const FMCPRequest& Request);
+	FMCPResponse HandleRemoveParameter(const FMCPRequest& Request);
+	FMCPResponse HandleRenameParameter(const FMCPRequest& Request);
+	FMCPResponse HandleSetParameterDefault(const FMCPRequest& Request);
+	FMCPResponse HandleSetParameterMetadata(const FMCPRequest& Request);
+	FMCPResponse HandleSetParameterChannelNames(const FMCPRequest& Request);
 	FMCPResponse HandleCapabilities(const FMCPRequest& Request);
 };

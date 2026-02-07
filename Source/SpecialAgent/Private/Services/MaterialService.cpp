@@ -11,20 +11,32 @@
 #include "GameThreadDispatcher.h"
 #include "MaterialEditingLibrary.h"
 #include "MaterialDomain.h"
+#include "Materials/MaterialExpressionFontSampleParameter.h"
+#include "Materials/MaterialExpressionParameter.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpressionComment.h"
 #include "Materials/MaterialExpressionReroute.h"
+#include "Materials/MaterialExpressionRuntimeVirtualTextureSampleParameter.h"
+#include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionStaticComponentMaskParameter.h"
+#include "Materials/MaterialExpressionStaticSwitchParameter.h"
+#include "Materials/MaterialExpressionTextureSampleParameter.h"
+#include "Materials/MaterialExpressionTextureSampleParameter2D.h"
+#include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialFunction.h"
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialParameterCollection.h"
+#include "Engine/Font.h"
+#include "Engine/Texture.h"
 #include "Misc/DefaultValueHelper.h"
 #include "Misc/EngineVersion.h"
 #include "Misc/PackageName.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/UnrealType.h"
+#include "VT/RuntimeVirtualTexture.h"
 
 namespace
 {
@@ -999,6 +1011,710 @@ namespace
 		return false;
 	}
 
+	enum class EMaterialParameterNodeType : uint8
+	{
+		Unknown,
+		Scalar,
+		Vector,
+		Texture,
+		StaticSwitch,
+		StaticComponentMask,
+		RuntimeVirtualTexture,
+		Font
+	};
+
+	static FString NormalizeParameterToken(const FString& Input)
+	{
+		FString Token = Input.TrimStartAndEnd().ToLower();
+		Token = Token.Replace(TEXT(" "), TEXT("_"));
+		Token = Token.Replace(TEXT("-"), TEXT("_"));
+		return Token;
+	}
+
+	static bool ParseParameterTypeToken(const FString& Input, EMaterialParameterNodeType& OutType)
+	{
+		const FString Token = NormalizeParameterToken(Input);
+		if (Token == TEXT("scalar") || Token == TEXT("float"))
+		{
+			OutType = EMaterialParameterNodeType::Scalar;
+			return true;
+		}
+		if (Token == TEXT("vector") || Token == TEXT("color"))
+		{
+			OutType = EMaterialParameterNodeType::Vector;
+			return true;
+		}
+		if (Token == TEXT("texture") || Token == TEXT("texture2d"))
+		{
+			OutType = EMaterialParameterNodeType::Texture;
+			return true;
+		}
+		if (Token == TEXT("static_switch") || Token == TEXT("switch"))
+		{
+			OutType = EMaterialParameterNodeType::StaticSwitch;
+			return true;
+		}
+		if (Token == TEXT("static_component_mask") || Token == TEXT("component_mask") || Token == TEXT("mask"))
+		{
+			OutType = EMaterialParameterNodeType::StaticComponentMask;
+			return true;
+		}
+		if (Token == TEXT("runtime_virtual_texture") || Token == TEXT("virtual_texture") || Token == TEXT("rvt"))
+		{
+			OutType = EMaterialParameterNodeType::RuntimeVirtualTexture;
+			return true;
+		}
+		if (Token == TEXT("font"))
+		{
+			OutType = EMaterialParameterNodeType::Font;
+			return true;
+		}
+		return false;
+	}
+
+	static FString ParameterTypeToString(const EMaterialParameterNodeType Type)
+	{
+		switch (Type)
+		{
+		case EMaterialParameterNodeType::Scalar: return TEXT("scalar");
+		case EMaterialParameterNodeType::Vector: return TEXT("vector");
+		case EMaterialParameterNodeType::Texture: return TEXT("texture");
+		case EMaterialParameterNodeType::StaticSwitch: return TEXT("static_switch");
+		case EMaterialParameterNodeType::StaticComponentMask: return TEXT("static_component_mask");
+		case EMaterialParameterNodeType::RuntimeVirtualTexture: return TEXT("runtime_virtual_texture");
+		case EMaterialParameterNodeType::Font: return TEXT("font");
+		default: return TEXT("unknown");
+		}
+	}
+
+	static EMaterialParameterNodeType GetParameterNodeType(const UMaterialExpression* Expression)
+	{
+		if (!Expression)
+		{
+			return EMaterialParameterNodeType::Unknown;
+		}
+		if (Expression->IsA<UMaterialExpressionScalarParameter>())
+		{
+			return EMaterialParameterNodeType::Scalar;
+		}
+		if (Expression->IsA<UMaterialExpressionVectorParameter>())
+		{
+			return EMaterialParameterNodeType::Vector;
+		}
+		if (Expression->IsA<UMaterialExpressionTextureSampleParameter>())
+		{
+			return EMaterialParameterNodeType::Texture;
+		}
+		if (Expression->IsA<UMaterialExpressionStaticSwitchParameter>())
+		{
+			return EMaterialParameterNodeType::StaticSwitch;
+		}
+		if (Expression->IsA<UMaterialExpressionStaticComponentMaskParameter>())
+		{
+			return EMaterialParameterNodeType::StaticComponentMask;
+		}
+		if (Expression->IsA<UMaterialExpressionRuntimeVirtualTextureSampleParameter>())
+		{
+			return EMaterialParameterNodeType::RuntimeVirtualTexture;
+		}
+		if (Expression->IsA<UMaterialExpressionFontSampleParameter>())
+		{
+			return EMaterialParameterNodeType::Font;
+		}
+		return EMaterialParameterNodeType::Unknown;
+	}
+
+	static bool IsSupportedParameterExpression(const UMaterialExpression* Expression)
+	{
+		return GetParameterNodeType(Expression) != EMaterialParameterNodeType::Unknown;
+	}
+
+	static FName GetParameterExpressionName(const UMaterialExpression* Expression)
+	{
+		if (const UMaterialExpressionParameter* Parameter = Cast<UMaterialExpressionParameter>(Expression))
+		{
+			return Parameter->ParameterName;
+		}
+		if (const UMaterialExpressionTextureSampleParameter* TextureParameter = Cast<UMaterialExpressionTextureSampleParameter>(Expression))
+		{
+			return TextureParameter->ParameterName;
+		}
+		if (const UMaterialExpressionRuntimeVirtualTextureSampleParameter* RuntimeVirtualTextureParameter = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(Expression))
+		{
+			return RuntimeVirtualTextureParameter->ParameterName;
+		}
+		if (const UMaterialExpressionFontSampleParameter* FontParameter = Cast<UMaterialExpressionFontSampleParameter>(Expression))
+		{
+			return FontParameter->ParameterName;
+		}
+		return NAME_None;
+	}
+
+	static bool SetParameterExpressionName(UMaterialExpression* Expression, const FName NewName)
+	{
+		if (UMaterialExpressionParameter* Parameter = Cast<UMaterialExpressionParameter>(Expression))
+		{
+			Parameter->ParameterName = NewName;
+			return true;
+		}
+		if (UMaterialExpressionTextureSampleParameter* TextureParameter = Cast<UMaterialExpressionTextureSampleParameter>(Expression))
+		{
+			TextureParameter->ParameterName = NewName;
+			return true;
+		}
+		if (UMaterialExpressionRuntimeVirtualTextureSampleParameter* RuntimeVirtualTextureParameter = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(Expression))
+		{
+			RuntimeVirtualTextureParameter->ParameterName = NewName;
+			return true;
+		}
+		if (UMaterialExpressionFontSampleParameter* FontParameter = Cast<UMaterialExpressionFontSampleParameter>(Expression))
+		{
+			FontParameter->ParameterName = NewName;
+			return true;
+		}
+		return false;
+	}
+
+	static FName GetParameterExpressionGroup(const UMaterialExpression* Expression)
+	{
+		if (const UMaterialExpressionParameter* Parameter = Cast<UMaterialExpressionParameter>(Expression))
+		{
+			return Parameter->Group;
+		}
+		if (const UMaterialExpressionTextureSampleParameter* TextureParameter = Cast<UMaterialExpressionTextureSampleParameter>(Expression))
+		{
+			return TextureParameter->Group;
+		}
+		if (const UMaterialExpressionRuntimeVirtualTextureSampleParameter* RuntimeVirtualTextureParameter = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(Expression))
+		{
+			return RuntimeVirtualTextureParameter->Group;
+		}
+		if (const UMaterialExpressionFontSampleParameter* FontParameter = Cast<UMaterialExpressionFontSampleParameter>(Expression))
+		{
+			return FontParameter->Group;
+		}
+		return NAME_None;
+	}
+
+	static bool SetParameterExpressionGroup(UMaterialExpression* Expression, const FName GroupName)
+	{
+		if (UMaterialExpressionParameter* Parameter = Cast<UMaterialExpressionParameter>(Expression))
+		{
+			Parameter->Group = GroupName;
+			return true;
+		}
+		if (UMaterialExpressionTextureSampleParameter* TextureParameter = Cast<UMaterialExpressionTextureSampleParameter>(Expression))
+		{
+			TextureParameter->Group = GroupName;
+			return true;
+		}
+		if (UMaterialExpressionRuntimeVirtualTextureSampleParameter* RuntimeVirtualTextureParameter = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(Expression))
+		{
+			RuntimeVirtualTextureParameter->Group = GroupName;
+			return true;
+		}
+		if (UMaterialExpressionFontSampleParameter* FontParameter = Cast<UMaterialExpressionFontSampleParameter>(Expression))
+		{
+			FontParameter->Group = GroupName;
+			return true;
+		}
+		return false;
+	}
+
+	static int32 GetParameterExpressionSortPriority(const UMaterialExpression* Expression)
+	{
+		if (const UMaterialExpressionParameter* Parameter = Cast<UMaterialExpressionParameter>(Expression))
+		{
+			return Parameter->SortPriority;
+		}
+		if (const UMaterialExpressionTextureSampleParameter* TextureParameter = Cast<UMaterialExpressionTextureSampleParameter>(Expression))
+		{
+			return TextureParameter->SortPriority;
+		}
+		if (const UMaterialExpressionRuntimeVirtualTextureSampleParameter* RuntimeVirtualTextureParameter = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(Expression))
+		{
+			return RuntimeVirtualTextureParameter->SortPriority;
+		}
+		if (const UMaterialExpressionFontSampleParameter* FontParameter = Cast<UMaterialExpressionFontSampleParameter>(Expression))
+		{
+			return FontParameter->SortPriority;
+		}
+		return 0;
+	}
+
+	static bool SetParameterExpressionSortPriority(UMaterialExpression* Expression, const int32 SortPriority)
+	{
+		if (UMaterialExpressionParameter* Parameter = Cast<UMaterialExpressionParameter>(Expression))
+		{
+			Parameter->SortPriority = SortPriority;
+			return true;
+		}
+		if (UMaterialExpressionTextureSampleParameter* TextureParameter = Cast<UMaterialExpressionTextureSampleParameter>(Expression))
+		{
+			TextureParameter->SortPriority = SortPriority;
+			return true;
+		}
+		if (UMaterialExpressionRuntimeVirtualTextureSampleParameter* RuntimeVirtualTextureParameter = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(Expression))
+		{
+			RuntimeVirtualTextureParameter->SortPriority = SortPriority;
+			return true;
+		}
+		if (UMaterialExpressionFontSampleParameter* FontParameter = Cast<UMaterialExpressionFontSampleParameter>(Expression))
+		{
+			FontParameter->SortPriority = SortPriority;
+			return true;
+		}
+		return false;
+	}
+
+	static FGuid GetParameterExpressionGuid(const UMaterialExpression* Expression)
+	{
+		if (const UMaterialExpressionParameter* Parameter = Cast<UMaterialExpressionParameter>(Expression))
+		{
+			return Parameter->ExpressionGUID;
+		}
+		if (const UMaterialExpressionTextureSampleParameter* TextureParameter = Cast<UMaterialExpressionTextureSampleParameter>(Expression))
+		{
+			return TextureParameter->ExpressionGUID;
+		}
+		if (const UMaterialExpressionRuntimeVirtualTextureSampleParameter* RuntimeVirtualTextureParameter = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(Expression))
+		{
+			return RuntimeVirtualTextureParameter->ExpressionGUID;
+		}
+		if (const UMaterialExpressionFontSampleParameter* FontParameter = Cast<UMaterialExpressionFontSampleParameter>(Expression))
+		{
+			return FontParameter->ExpressionGUID;
+		}
+		return FGuid();
+	}
+
+	static bool SetParameterExpressionGuid(UMaterialExpression* Expression, const FGuid& Guid)
+	{
+		if (UMaterialExpressionParameter* Parameter = Cast<UMaterialExpressionParameter>(Expression))
+		{
+			Parameter->ExpressionGUID = Guid;
+			return true;
+		}
+		if (UMaterialExpressionTextureSampleParameter* TextureParameter = Cast<UMaterialExpressionTextureSampleParameter>(Expression))
+		{
+			TextureParameter->ExpressionGUID = Guid;
+			return true;
+		}
+		if (UMaterialExpressionRuntimeVirtualTextureSampleParameter* RuntimeVirtualTextureParameter = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(Expression))
+		{
+			RuntimeVirtualTextureParameter->ExpressionGUID = Guid;
+			return true;
+		}
+		if (UMaterialExpressionFontSampleParameter* FontParameter = Cast<UMaterialExpressionFontSampleParameter>(Expression))
+		{
+			FontParameter->ExpressionGUID = Guid;
+			return true;
+		}
+		return false;
+	}
+
+	static TSharedPtr<FJsonObject> BuildColorJson(const FLinearColor& Color)
+	{
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetNumberField(TEXT("r"), Color.R);
+		Value->SetNumberField(TEXT("g"), Color.G);
+		Value->SetNumberField(TEXT("b"), Color.B);
+		Value->SetNumberField(TEXT("a"), Color.A);
+		return Value;
+	}
+
+	static TSharedPtr<FJsonObject> BuildMaskJson(const bool bR, const bool bG, const bool bB, const bool bA)
+	{
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetBoolField(TEXT("r"), bR);
+		Value->SetBoolField(TEXT("g"), bG);
+		Value->SetBoolField(TEXT("b"), bB);
+		Value->SetBoolField(TEXT("a"), bA);
+		return Value;
+	}
+
+	static TSharedPtr<FJsonObject> BuildChannelNamesJson(const FParameterChannelNames& ChannelNames)
+	{
+		TSharedPtr<FJsonObject> Value = MakeShared<FJsonObject>();
+		Value->SetStringField(TEXT("r"), ChannelNames.R.ToString());
+		Value->SetStringField(TEXT("g"), ChannelNames.G.ToString());
+		Value->SetStringField(TEXT("b"), ChannelNames.B.ToString());
+		Value->SetStringField(TEXT("a"), ChannelNames.A.ToString());
+		return Value;
+	}
+
+	static bool TryApplyChannelNameFields(
+		const TSharedPtr<FJsonObject>& Params,
+		FParameterChannelNames& InOutChannelNames,
+		bool& bOutAnyFieldsSet)
+	{
+		bOutAnyFieldsSet = false;
+		if (!Params.IsValid())
+		{
+			return false;
+		}
+
+		auto ApplyField = [&InOutChannelNames, &bOutAnyFieldsSet](const TSharedPtr<FJsonObject>& Source, const TCHAR* FieldName, FText& Target) -> void
+		{
+			if (!Source.IsValid())
+			{
+				return;
+			}
+
+			FString Value;
+			if (Source->TryGetStringField(FieldName, Value))
+			{
+				Target = FText::FromString(Value);
+				bOutAnyFieldsSet = true;
+			}
+		};
+
+		const TSharedPtr<FJsonObject>* ChannelNamesObjectPtr = nullptr;
+		if (Params->TryGetObjectField(TEXT("channel_names"), ChannelNamesObjectPtr) && ChannelNamesObjectPtr && ChannelNamesObjectPtr->IsValid())
+		{
+			const TSharedPtr<FJsonObject>& ChannelNamesObject = *ChannelNamesObjectPtr;
+			ApplyField(ChannelNamesObject, TEXT("r"), InOutChannelNames.R);
+			ApplyField(ChannelNamesObject, TEXT("g"), InOutChannelNames.G);
+			ApplyField(ChannelNamesObject, TEXT("b"), InOutChannelNames.B);
+			ApplyField(ChannelNamesObject, TEXT("a"), InOutChannelNames.A);
+		}
+
+		ApplyField(Params, TEXT("channel_r"), InOutChannelNames.R);
+		ApplyField(Params, TEXT("channel_g"), InOutChannelNames.G);
+		ApplyField(Params, TEXT("channel_b"), InOutChannelNames.B);
+		ApplyField(Params, TEXT("channel_a"), InOutChannelNames.A);
+
+		return true;
+	}
+
+	static bool TryReadLinearColor(
+		const TSharedPtr<FJsonObject>& Params,
+		const TCHAR* FieldName,
+		FLinearColor& OutColor,
+		FString& OutError)
+	{
+		if (!Params.IsValid())
+		{
+			OutError = TEXT("Missing params object");
+			return false;
+		}
+
+		double ScalarValue = 0.0;
+		if (Params->TryGetNumberField(FieldName, ScalarValue))
+		{
+			const float Value = static_cast<float>(ScalarValue);
+			OutColor = FLinearColor(Value, Value, Value, 1.0f);
+			return true;
+		}
+
+		FString ColorString;
+		if (Params->TryGetStringField(FieldName, ColorString))
+		{
+			if (OutColor.InitFromString(ColorString))
+			{
+				return true;
+			}
+			OutError = FString::Printf(TEXT("Failed to parse color string '%s'"), *ColorString);
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject>* ColorObjectPtr = nullptr;
+		if (Params->TryGetObjectField(FieldName, ColorObjectPtr) && ColorObjectPtr && ColorObjectPtr->IsValid())
+		{
+			const TSharedPtr<FJsonObject>& ColorObject = *ColorObjectPtr;
+			double R = 0.0;
+			double G = 0.0;
+			double B = 0.0;
+			double A = 1.0;
+			const bool bHasR = ColorObject->TryGetNumberField(TEXT("r"), R);
+			const bool bHasG = ColorObject->TryGetNumberField(TEXT("g"), G);
+			const bool bHasB = ColorObject->TryGetNumberField(TEXT("b"), B);
+			ColorObject->TryGetNumberField(TEXT("a"), A);
+			if (!bHasR || !bHasG || !bHasB)
+			{
+				OutError = FString::Printf(TEXT("Field '%s' requires at least r, g, and b"), FieldName);
+				return false;
+			}
+			OutColor = FLinearColor(static_cast<float>(R), static_cast<float>(G), static_cast<float>(B), static_cast<float>(A));
+			return true;
+		}
+
+		double R = 0.0;
+		double G = 0.0;
+		double B = 0.0;
+		double A = 1.0;
+		const bool bHasR = Params->TryGetNumberField(TEXT("default_r"), R);
+		const bool bHasG = Params->TryGetNumberField(TEXT("default_g"), G);
+		const bool bHasB = Params->TryGetNumberField(TEXT("default_b"), B);
+		if (bHasR && bHasG && bHasB)
+		{
+			Params->TryGetNumberField(TEXT("default_a"), A);
+			OutColor = FLinearColor(static_cast<float>(R), static_cast<float>(G), static_cast<float>(B), static_cast<float>(A));
+			return true;
+		}
+
+		OutError = FString::Printf(TEXT("Missing required color field '%s'"), FieldName);
+		return false;
+	}
+
+	static bool TryReadStaticComponentMaskDefaults(
+		const TSharedPtr<FJsonObject>& Params,
+		bool& bOutR,
+		bool& bOutG,
+		bool& bOutB,
+		bool& bOutA,
+		FString& OutError)
+	{
+		if (!Params.IsValid())
+		{
+			OutError = TEXT("Missing params object");
+			return false;
+		}
+
+		const TSharedPtr<FJsonObject>* MaskObjectPtr = nullptr;
+		if ((Params->TryGetObjectField(TEXT("default_mask"), MaskObjectPtr) || Params->TryGetObjectField(TEXT("default_value"), MaskObjectPtr)) && MaskObjectPtr && MaskObjectPtr->IsValid())
+		{
+			const TSharedPtr<FJsonObject>& MaskObject = *MaskObjectPtr;
+
+			const bool bHasR = MaskObject->TryGetBoolField(TEXT("r"), bOutR);
+			const bool bHasG = MaskObject->TryGetBoolField(TEXT("g"), bOutG);
+			const bool bHasB = MaskObject->TryGetBoolField(TEXT("b"), bOutB);
+			const bool bHasA = MaskObject->TryGetBoolField(TEXT("a"), bOutA);
+			if (!(bHasR && bHasG && bHasB && bHasA))
+			{
+				OutError = TEXT("Mask object must include boolean r, g, b, and a fields");
+				return false;
+			}
+			return true;
+		}
+
+		const bool bHasR = Params->TryGetBoolField(TEXT("default_r"), bOutR);
+		const bool bHasG = Params->TryGetBoolField(TEXT("default_g"), bOutG);
+		const bool bHasB = Params->TryGetBoolField(TEXT("default_b"), bOutB);
+		const bool bHasA = Params->TryGetBoolField(TEXT("default_a"), bOutA);
+		if (bHasR && bHasG && bHasB && bHasA)
+		{
+			return true;
+		}
+
+		OutError = TEXT("Missing static component mask defaults; provide default_mask{r,g,b,a} or default_r/default_g/default_b/default_a");
+		return false;
+	}
+
+	static void GatherParameterExpressions(const FMaterialGraphContext& Context, TArray<UMaterialExpression*>& OutParameters)
+	{
+		OutParameters.Reset();
+		if (!Context.Material)
+		{
+			return;
+		}
+
+		for (UMaterialExpression* Expression : Context.Material->GetExpressions())
+		{
+			if (IsSupportedParameterExpression(Expression))
+			{
+				OutParameters.Add(Expression);
+			}
+		}
+	}
+
+	static bool ParameterNameEquals(const FName NameA, const FString& NameB)
+	{
+		return NameA.ToString().Equals(NameB, ESearchCase::IgnoreCase);
+	}
+
+	static void GatherParameterMatchesByName(
+		const FMaterialGraphContext& Context,
+		const FString& ParameterName,
+		const bool bHasTypeFilter,
+		const EMaterialParameterNodeType TypeFilter,
+		TArray<UMaterialExpression*>& OutMatches)
+	{
+		OutMatches.Reset();
+		const FString TrimmedName = ParameterName.TrimStartAndEnd();
+		if (TrimmedName.IsEmpty())
+		{
+			return;
+		}
+
+		TArray<UMaterialExpression*> Parameters;
+		GatherParameterExpressions(Context, Parameters);
+		for (UMaterialExpression* Expression : Parameters)
+		{
+			if (!Expression)
+			{
+				continue;
+			}
+
+			if (!ParameterNameEquals(GetParameterExpressionName(Expression), TrimmedName))
+			{
+				continue;
+			}
+
+			const EMaterialParameterNodeType ParameterType = GetParameterNodeType(Expression);
+			if (bHasTypeFilter && ParameterType != TypeFilter)
+			{
+				continue;
+			}
+
+			OutMatches.Add(Expression);
+		}
+	}
+
+	static UMaterialExpression* ResolveParameterExpression(
+		const FMaterialGraphContext& Context,
+		const FString& NodeId,
+		const FString& ParameterName,
+		const bool bHasTypeFilter,
+		const EMaterialParameterNodeType TypeFilter,
+		FString& OutError)
+	{
+		const FString TrimmedNodeId = NodeId.TrimStartAndEnd();
+		if (!TrimmedNodeId.IsEmpty())
+		{
+			UMaterialExpression* Expression = FindNodeById(Context, TrimmedNodeId);
+			if (!Expression)
+			{
+				OutError = FString::Printf(TEXT("Node not found: %s"), *TrimmedNodeId);
+				return nullptr;
+			}
+			if (!IsSupportedParameterExpression(Expression))
+			{
+				OutError = FString::Printf(TEXT("Node is not a supported parameter expression: %s"), *TrimmedNodeId);
+				return nullptr;
+			}
+			if (bHasTypeFilter && GetParameterNodeType(Expression) != TypeFilter)
+			{
+				OutError = FString::Printf(TEXT("Node is not of requested parameter_type '%s'"), *ParameterTypeToString(TypeFilter));
+				return nullptr;
+			}
+			return Expression;
+		}
+
+		TArray<UMaterialExpression*> Matches;
+		GatherParameterMatchesByName(Context, ParameterName, bHasTypeFilter, TypeFilter, Matches);
+		if (Matches.Num() == 0)
+		{
+			OutError = ParameterName.TrimStartAndEnd().IsEmpty()
+				? TEXT("Missing target parameter: provide node_id or parameter_name")
+				: FString::Printf(TEXT("Parameter not found: %s"), *ParameterName);
+			return nullptr;
+		}
+		if (Matches.Num() > 1)
+		{
+			OutError = FString::Printf(TEXT("Parameter name is ambiguous (%d matches). Provide node_id."), Matches.Num());
+			return nullptr;
+		}
+		return Matches[0];
+	}
+
+	static TSharedPtr<FJsonObject> BuildParameterJson(UMaterialExpression* Expression)
+	{
+		TSharedPtr<FJsonObject> ParameterObject = BuildNodeJson(Expression);
+		if (!Expression || !ParameterObject.IsValid())
+		{
+			return ParameterObject;
+		}
+
+		const EMaterialParameterNodeType ParameterType = GetParameterNodeType(Expression);
+		ParameterObject->SetStringField(TEXT("parameter_type"), ParameterTypeToString(ParameterType));
+		ParameterObject->SetStringField(TEXT("parameter_name"), GetParameterExpressionName(Expression).ToString());
+		ParameterObject->SetStringField(TEXT("group"), GetParameterExpressionGroup(Expression).ToString());
+		ParameterObject->SetNumberField(TEXT("sort_priority"), GetParameterExpressionSortPriority(Expression));
+		ParameterObject->SetStringField(TEXT("description"), Expression->Desc);
+
+		const FGuid ParameterGuid = GetParameterExpressionGuid(Expression);
+		ParameterObject->SetStringField(TEXT("parameter_guid"), ParameterGuid.IsValid() ? ParameterGuid.ToString(EGuidFormats::DigitsWithHyphens) : FString());
+
+		if (const UMaterialExpressionScalarParameter* Scalar = Cast<UMaterialExpressionScalarParameter>(Expression))
+		{
+			ParameterObject->SetNumberField(TEXT("default_value"), Scalar->DefaultValue);
+		}
+		else if (const UMaterialExpressionVectorParameter* Vector = Cast<UMaterialExpressionVectorParameter>(Expression))
+		{
+			ParameterObject->SetObjectField(TEXT("default_value"), BuildColorJson(Vector->DefaultValue));
+			ParameterObject->SetObjectField(TEXT("channel_names"), BuildChannelNamesJson(Vector->ChannelNames));
+		}
+		else if (const UMaterialExpressionTextureSampleParameter* Texture = Cast<UMaterialExpressionTextureSampleParameter>(Expression))
+		{
+			ParameterObject->SetStringField(TEXT("default_texture"), Texture->Texture ? Texture->Texture->GetPathName() : FString());
+			ParameterObject->SetObjectField(TEXT("channel_names"), BuildChannelNamesJson(Texture->ChannelNames));
+		}
+		else if (const UMaterialExpressionStaticSwitchParameter* StaticSwitch = Cast<UMaterialExpressionStaticSwitchParameter>(Expression))
+		{
+			ParameterObject->SetBoolField(TEXT("default_value"), StaticSwitch->DefaultValue != 0);
+		}
+		else if (const UMaterialExpressionStaticComponentMaskParameter* StaticMask = Cast<UMaterialExpressionStaticComponentMaskParameter>(Expression))
+		{
+			ParameterObject->SetObjectField(TEXT("default_mask"), BuildMaskJson(StaticMask->DefaultR != 0, StaticMask->DefaultG != 0, StaticMask->DefaultB != 0, StaticMask->DefaultA != 0));
+		}
+		else if (const UMaterialExpressionRuntimeVirtualTextureSampleParameter* RuntimeVirtualTexture = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(Expression))
+		{
+			ParameterObject->SetStringField(TEXT("default_runtime_virtual_texture"), RuntimeVirtualTexture->VirtualTexture ? RuntimeVirtualTexture->VirtualTexture->GetPathName() : FString());
+		}
+		else if (const UMaterialExpressionFontSampleParameter* Font = Cast<UMaterialExpressionFontSampleParameter>(Expression))
+		{
+			ParameterObject->SetStringField(TEXT("default_font"), Font->Font ? Font->Font->GetPathName() : FString());
+			ParameterObject->SetNumberField(TEXT("font_page"), Font->FontTexturePage);
+		}
+
+		return ParameterObject;
+	}
+
+	static bool DoesParameterNameConflict(
+		const FMaterialGraphContext& Context,
+		const UMaterialExpression* IgnoredExpression,
+		const FName CandidateName,
+		FString& OutConflictingNodeId)
+	{
+		TArray<UMaterialExpression*> Parameters;
+		GatherParameterExpressions(Context, Parameters);
+		for (UMaterialExpression* Existing : Parameters)
+		{
+			if (!Existing || Existing == IgnoredExpression)
+			{
+				continue;
+			}
+
+			if (GetParameterExpressionName(Existing).IsEqual(CandidateName, ENameCase::IgnoreCase))
+			{
+				OutConflictingNodeId = GetNodeId(Existing);
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	static bool TryResolveParameterTypeFilter(
+		const TSharedPtr<FJsonObject>& Params,
+		bool& bOutHasTypeFilter,
+		EMaterialParameterNodeType& OutTypeFilter,
+		FString& OutError)
+	{
+		bOutHasTypeFilter = false;
+		OutTypeFilter = EMaterialParameterNodeType::Unknown;
+		if (!Params.IsValid())
+		{
+			return true;
+		}
+
+		FString ParameterTypeString;
+		if (!Params->TryGetStringField(TEXT("parameter_type"), ParameterTypeString))
+		{
+			return true;
+		}
+
+		if (!ParseParameterTypeToken(ParameterTypeString, OutTypeFilter))
+		{
+			OutError = FString::Printf(TEXT("Unsupported parameter_type '%s'"), *ParameterTypeString);
+			return false;
+		}
+
+		bOutHasTypeFilter = true;
+		return true;
+	}
+
 	static void WriteMaterialSettings(const UMaterial* Material, const TSharedPtr<FJsonObject>& Result)
 	{
 		Result->SetStringField(TEXT("domain"), DomainToString(Material->MaterialDomain));
@@ -1079,6 +1795,13 @@ TArray<FMCPToolInfo> FMaterialService::GetAvailableTools() const
 	AddTool(TEXT("list_connected_outputs"), TEXT("List material output properties and current graph connections."));
 	AddTool(TEXT("set_custom_uv_output"), TEXT("Connect a node output to a custom UV channel."));
 	AddTool(TEXT("set_pixel_depth_offset_output"), TEXT("Connect a node output to the pixel depth offset output."));
+	AddTool(TEXT("list_parameters"), TEXT("List parameter expressions in a material graph."));
+	AddTool(TEXT("add_parameter"), TEXT("Add a parameter expression node to a material graph."));
+	AddTool(TEXT("remove_parameter"), TEXT("Remove a parameter expression node from a material graph."));
+	AddTool(TEXT("rename_parameter"), TEXT("Rename a parameter in a material graph."));
+	AddTool(TEXT("set_parameter_default"), TEXT("Set the default value on a parameter expression."));
+	AddTool(TEXT("set_parameter_metadata"), TEXT("Set parameter metadata (group, sort priority, description)."));
+	AddTool(TEXT("set_parameter_channel_names"), TEXT("Set channel display names for vector/texture parameters."));
 	AddTool(TEXT("capabilities"), TEXT("Report baseline material service capabilities and module availability."));
 	return Tools;
 }
@@ -1115,6 +1838,13 @@ FMCPResponse FMaterialService::HandleRequest(const FMCPRequest& Request, const F
 	if (MethodName == TEXT("list_connected_outputs")) return HandleListConnectedOutputs(Request);
 	if (MethodName == TEXT("set_custom_uv_output")) return HandleSetCustomUVOutput(Request);
 	if (MethodName == TEXT("set_pixel_depth_offset_output")) return HandleSetPixelDepthOffsetOutput(Request);
+	if (MethodName == TEXT("list_parameters")) return HandleListParameters(Request);
+	if (MethodName == TEXT("add_parameter")) return HandleAddParameter(Request);
+	if (MethodName == TEXT("remove_parameter")) return HandleRemoveParameter(Request);
+	if (MethodName == TEXT("rename_parameter")) return HandleRenameParameter(Request);
+	if (MethodName == TEXT("set_parameter_default")) return HandleSetParameterDefault(Request);
+	if (MethodName == TEXT("set_parameter_metadata")) return HandleSetParameterMetadata(Request);
+	if (MethodName == TEXT("set_parameter_channel_names")) return HandleSetParameterChannelNames(Request);
 	if (MethodName == TEXT("capabilities")) return HandleCapabilities(Request);
 	return MethodNotFound(Request.Id, TEXT("material"), MethodName);
 }
@@ -3424,6 +4154,936 @@ FMCPResponse FMaterialService::HandleSetPixelDepthOffsetOutput(const FMCPRequest
 	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
 }
 
+FMCPResponse FMaterialService::HandleListParameters(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	bool bHasTypeFilter = false;
+	EMaterialParameterNodeType TypeFilter = EMaterialParameterNodeType::Unknown;
+	FString TypeFilterError;
+	if (!TryResolveParameterTypeFilter(Request.Params, bHasTypeFilter, TypeFilter, TypeFilterError))
+	{
+		return InvalidParams(Request.Id, TypeFilterError);
+	}
+
+	auto Task = [AssetPath, bHasTypeFilter, TypeFilter]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/list_parameters only supports UMaterial assets"));
+		}
+
+		TArray<UMaterialExpression*> Parameters;
+		GatherParameterExpressions(Context, Parameters);
+
+		TArray<TSharedPtr<FJsonValue>> ParameterArray;
+		for (UMaterialExpression* Parameter : Parameters)
+		{
+			if (!Parameter)
+			{
+				continue;
+			}
+
+			if (bHasTypeFilter && GetParameterNodeType(Parameter) != TypeFilter)
+			{
+				continue;
+			}
+
+			ParameterArray.Add(MakeShared<FJsonValueObject>(BuildParameterJson(Parameter)));
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetArrayField(TEXT("parameters"), ParameterArray);
+		Result->SetNumberField(TEXT("parameter_count"), ParameterArray.Num());
+		if (bHasTypeFilter)
+		{
+			Result->SetStringField(TEXT("parameter_type_filter"), ParameterTypeToString(TypeFilter));
+		}
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleAddParameter(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	FString ParameterTypeString;
+	FString ParameterName;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("parameter_type"), ParameterTypeString))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_type'"));
+	}
+	if (!Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'parameter_name'"));
+	}
+
+	const FString TrimmedParameterName = ParameterName.TrimStartAndEnd();
+	if (TrimmedParameterName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'parameter_name' cannot be empty"));
+	}
+
+	EMaterialParameterNodeType ParameterType = EMaterialParameterNodeType::Unknown;
+	if (!ParseParameterTypeToken(ParameterTypeString, ParameterType))
+	{
+		return InvalidParams(Request.Id, FString::Printf(TEXT("Unsupported parameter_type '%s'"), *ParameterTypeString));
+	}
+
+	int32 NodePosX = 0;
+	int32 NodePosY = 0;
+	double NodePosXDouble = 0.0;
+	double NodePosYDouble = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("node_pos_x"), NodePosXDouble))
+	{
+		NodePosX = static_cast<int32>(NodePosXDouble);
+	}
+	if (Request.Params->TryGetNumberField(TEXT("node_pos_y"), NodePosYDouble))
+	{
+		NodePosY = static_cast<int32>(NodePosYDouble);
+	}
+
+	FString GroupName;
+	const bool bHasGroup = Request.Params->TryGetStringField(TEXT("group"), GroupName);
+
+	bool bHasSortPriority = false;
+	int32 SortPriority = 0;
+	double SortPriorityDouble = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("sort_priority"), SortPriorityDouble))
+	{
+		bHasSortPriority = true;
+		SortPriority = static_cast<int32>(SortPriorityDouble);
+	}
+
+	FString Description;
+	const bool bHasDescription = Request.Params->TryGetStringField(TEXT("description"), Description);
+
+	const TSharedPtr<FJsonObject> Params = Request.Params;
+	auto Task = [AssetPath, ParameterType, TrimmedParameterName, NodePosX, NodePosY, bHasGroup, GroupName, bHasSortPriority, SortPriority, bHasDescription, Description, Params]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/add_parameter only supports UMaterial assets"));
+		}
+
+		FString ConflictingNodeId;
+		if (DoesParameterNameConflict(Context, nullptr, FName(*TrimmedParameterName), ConflictingNodeId))
+		{
+			return MakeFailure(FString::Printf(TEXT("Parameter name already exists: %s (node_id=%s)"), *TrimmedParameterName, *ConflictingNodeId));
+		}
+
+		UClass* ExpressionClass = nullptr;
+		switch (ParameterType)
+		{
+		case EMaterialParameterNodeType::Scalar:
+			ExpressionClass = UMaterialExpressionScalarParameter::StaticClass();
+			break;
+		case EMaterialParameterNodeType::Vector:
+			ExpressionClass = UMaterialExpressionVectorParameter::StaticClass();
+			break;
+		case EMaterialParameterNodeType::Texture:
+			ExpressionClass = UMaterialExpressionTextureSampleParameter2D::StaticClass();
+			break;
+		case EMaterialParameterNodeType::StaticSwitch:
+			ExpressionClass = UMaterialExpressionStaticSwitchParameter::StaticClass();
+			break;
+		case EMaterialParameterNodeType::StaticComponentMask:
+			ExpressionClass = UMaterialExpressionStaticComponentMaskParameter::StaticClass();
+			break;
+		case EMaterialParameterNodeType::RuntimeVirtualTexture:
+			ExpressionClass = UMaterialExpressionRuntimeVirtualTextureSampleParameter::StaticClass();
+			break;
+		case EMaterialParameterNodeType::Font:
+			ExpressionClass = UMaterialExpressionFontSampleParameter::StaticClass();
+			break;
+		default:
+			break;
+		}
+
+		if (!ExpressionClass)
+		{
+			return MakeFailure(TEXT("Failed to resolve expression class for requested parameter_type"));
+		}
+
+		UMaterialExpression* NewExpression = UMaterialEditingLibrary::CreateMaterialExpressionEx(
+			Context.Material,
+			nullptr,
+			ExpressionClass,
+			nullptr,
+			NodePosX,
+			NodePosY,
+			true);
+		if (!NewExpression)
+		{
+			return MakeFailure(TEXT("Failed to create parameter expression"));
+		}
+
+		NewExpression->Modify();
+		if (!SetParameterExpressionName(NewExpression, FName(*TrimmedParameterName)))
+		{
+			return MakeFailure(TEXT("Created expression does not expose a parameter name"));
+		}
+		if (bHasGroup)
+		{
+			SetParameterExpressionGroup(NewExpression, GroupName.TrimStartAndEnd().IsEmpty() ? NAME_None : FName(*GroupName.TrimStartAndEnd()));
+		}
+		if (bHasSortPriority)
+		{
+			SetParameterExpressionSortPriority(NewExpression, SortPriority);
+		}
+		if (bHasDescription)
+		{
+			NewExpression->Desc = Description;
+		}
+
+		FGuid ParameterGuid = GetParameterExpressionGuid(NewExpression);
+		if (!ParameterGuid.IsValid())
+		{
+			ParameterGuid = FGuid::NewGuid();
+			SetParameterExpressionGuid(NewExpression, ParameterGuid);
+		}
+
+		switch (ParameterType)
+		{
+		case EMaterialParameterNodeType::Scalar:
+			if (UMaterialExpressionScalarParameter* Scalar = Cast<UMaterialExpressionScalarParameter>(NewExpression))
+			{
+				double Value = 0.0;
+				if (Params->TryGetNumberField(TEXT("default_value"), Value))
+				{
+					Scalar->DefaultValue = static_cast<float>(Value);
+				}
+			}
+			break;
+		case EMaterialParameterNodeType::Vector:
+			if (UMaterialExpressionVectorParameter* Vector = Cast<UMaterialExpressionVectorParameter>(NewExpression))
+			{
+				if (Params->HasField(TEXT("default_value")) || Params->HasField(TEXT("default_r")) || Params->HasField(TEXT("default_g")) || Params->HasField(TEXT("default_b")) || Params->HasField(TEXT("default_a")))
+				{
+					FLinearColor DefaultColor = Vector->DefaultValue;
+					if (!TryReadLinearColor(Params, TEXT("default_value"), DefaultColor, Error))
+					{
+						return MakeFailure(Error);
+					}
+					Vector->DefaultValue = DefaultColor;
+				}
+
+				bool bHasChannelNameFields = false;
+				TryApplyChannelNameFields(Params, Vector->ChannelNames, bHasChannelNameFields);
+			}
+			break;
+		case EMaterialParameterNodeType::Texture:
+			if (UMaterialExpressionTextureSampleParameter* Texture = Cast<UMaterialExpressionTextureSampleParameter>(NewExpression))
+			{
+				FString TexturePath;
+				if (Params->TryGetStringField(TEXT("texture_path"), TexturePath) || Params->TryGetStringField(TEXT("default_texture_path"), TexturePath))
+				{
+					TexturePath = TexturePath.TrimStartAndEnd();
+					Texture->Texture = TexturePath.IsEmpty() ? nullptr : LoadAssetAs<UTexture>(TexturePath);
+					if (!TexturePath.IsEmpty() && !Texture->Texture)
+					{
+						return MakeFailure(FString::Printf(TEXT("Texture asset not found: %s"), *TexturePath));
+					}
+				}
+
+				bool bHasChannelNameFields = false;
+				TryApplyChannelNameFields(Params, Texture->ChannelNames, bHasChannelNameFields);
+				if (bHasChannelNameFields)
+				{
+					Texture->ApplyChannelNames();
+				}
+			}
+			break;
+		case EMaterialParameterNodeType::StaticSwitch:
+			if (UMaterialExpressionStaticSwitchParameter* StaticSwitch = Cast<UMaterialExpressionStaticSwitchParameter>(NewExpression))
+			{
+				bool bDefaultValue = false;
+				if (Params->TryGetBoolField(TEXT("default_value"), bDefaultValue))
+				{
+					StaticSwitch->DefaultValue = bDefaultValue ? 1 : 0;
+				}
+			}
+			break;
+		case EMaterialParameterNodeType::StaticComponentMask:
+			if (UMaterialExpressionStaticComponentMaskParameter* StaticMask = Cast<UMaterialExpressionStaticComponentMaskParameter>(NewExpression))
+			{
+				if (Params->HasField(TEXT("default_mask")) || Params->HasField(TEXT("default_value")) || Params->HasField(TEXT("default_r")) || Params->HasField(TEXT("default_g")) || Params->HasField(TEXT("default_b")) || Params->HasField(TEXT("default_a")))
+				{
+					bool bR = false;
+					bool bG = false;
+					bool bB = false;
+					bool bA = false;
+					if (!TryReadStaticComponentMaskDefaults(Params, bR, bG, bB, bA, Error))
+					{
+						return MakeFailure(Error);
+					}
+					StaticMask->DefaultR = bR ? 1 : 0;
+					StaticMask->DefaultG = bG ? 1 : 0;
+					StaticMask->DefaultB = bB ? 1 : 0;
+					StaticMask->DefaultA = bA ? 1 : 0;
+				}
+			}
+			break;
+		case EMaterialParameterNodeType::RuntimeVirtualTexture:
+			if (UMaterialExpressionRuntimeVirtualTextureSampleParameter* RuntimeVirtualTexture = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(NewExpression))
+			{
+				FString RuntimeVirtualTexturePath;
+				if (Params->TryGetStringField(TEXT("runtime_virtual_texture_path"), RuntimeVirtualTexturePath) || Params->TryGetStringField(TEXT("virtual_texture_path"), RuntimeVirtualTexturePath))
+				{
+					RuntimeVirtualTexturePath = RuntimeVirtualTexturePath.TrimStartAndEnd();
+					RuntimeVirtualTexture->VirtualTexture = RuntimeVirtualTexturePath.IsEmpty() ? nullptr : LoadAssetAs<URuntimeVirtualTexture>(RuntimeVirtualTexturePath);
+					if (!RuntimeVirtualTexturePath.IsEmpty() && !RuntimeVirtualTexture->VirtualTexture)
+					{
+						return MakeFailure(FString::Printf(TEXT("Runtime virtual texture asset not found: %s"), *RuntimeVirtualTexturePath));
+					}
+				}
+			}
+			break;
+		case EMaterialParameterNodeType::Font:
+			if (UMaterialExpressionFontSampleParameter* Font = Cast<UMaterialExpressionFontSampleParameter>(NewExpression))
+			{
+				FString FontPath;
+				if (Params->TryGetStringField(TEXT("font_path"), FontPath) || Params->TryGetStringField(TEXT("default_font_path"), FontPath))
+				{
+					FontPath = FontPath.TrimStartAndEnd();
+					Font->Font = FontPath.IsEmpty() ? nullptr : LoadAssetAs<UFont>(FontPath);
+					if (!FontPath.IsEmpty() && !Font->Font)
+					{
+						return MakeFailure(FString::Printf(TEXT("Font asset not found: %s"), *FontPath));
+					}
+				}
+
+				double FontPageDouble = 0.0;
+				if (Params->TryGetNumberField(TEXT("font_page"), FontPageDouble))
+				{
+					Font->FontTexturePage = static_cast<int32>(FontPageDouble);
+				}
+			}
+			break;
+		default:
+			break;
+		}
+
+		Context.MarkDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetStringField(TEXT("parameter_type"), ParameterTypeToString(ParameterType));
+		Result->SetObjectField(TEXT("parameter"), BuildParameterJson(NewExpression));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleRemoveParameter(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	FString NodeId;
+	Request.Params->TryGetStringField(TEXT("node_id"), NodeId);
+	FString ParameterName;
+	Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName);
+	bool bRemoveAllMatches = false;
+	Request.Params->TryGetBoolField(TEXT("remove_all_matches"), bRemoveAllMatches);
+
+	bool bHasTypeFilter = false;
+	EMaterialParameterNodeType TypeFilter = EMaterialParameterNodeType::Unknown;
+	FString TypeFilterError;
+	if (!TryResolveParameterTypeFilter(Request.Params, bHasTypeFilter, TypeFilter, TypeFilterError))
+	{
+		return InvalidParams(Request.Id, TypeFilterError);
+	}
+
+	auto Task = [AssetPath, NodeId, ParameterName, bRemoveAllMatches, bHasTypeFilter, TypeFilter]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/remove_parameter only supports UMaterial assets"));
+		}
+
+		TArray<UMaterialExpression*> Targets;
+		if (!NodeId.TrimStartAndEnd().IsEmpty())
+		{
+			UMaterialExpression* Parameter = ResolveParameterExpression(Context, NodeId, FString(), bHasTypeFilter, TypeFilter, Error);
+			if (!Parameter)
+			{
+				return MakeFailure(Error);
+			}
+			Targets.Add(Parameter);
+		}
+		else
+		{
+			GatherParameterMatchesByName(Context, ParameterName, bHasTypeFilter, TypeFilter, Targets);
+			if (Targets.Num() == 0)
+			{
+				return MakeFailure(ParameterName.TrimStartAndEnd().IsEmpty()
+					? TEXT("Missing target parameter: provide node_id or parameter_name")
+					: FString::Printf(TEXT("Parameter not found: %s"), *ParameterName));
+			}
+			if (Targets.Num() > 1 && !bRemoveAllMatches)
+			{
+				return MakeFailure(FString::Printf(TEXT("Parameter name is ambiguous (%d matches). Provide node_id or set remove_all_matches=true."), Targets.Num()));
+			}
+			if (!bRemoveAllMatches && Targets.Num() > 1)
+			{
+				Targets.SetNum(1);
+			}
+		}
+
+		TArray<TSharedPtr<FJsonValue>> Removed;
+		for (UMaterialExpression* Target : Targets)
+		{
+			if (!Target)
+			{
+				continue;
+			}
+
+			Removed.Add(MakeShared<FJsonValueObject>(BuildParameterJson(Target)));
+			UMaterialEditingLibrary::DeleteMaterialExpression(Context.Material, Target);
+		}
+
+		Context.MarkDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetArrayField(TEXT("removed_parameters"), Removed);
+		Result->SetNumberField(TEXT("removed_count"), Removed.Num());
+		Result->SetBoolField(TEXT("remove_all_matches"), bRemoveAllMatches);
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleRenameParameter(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	FString NewParameterName;
+	if (!Request.Params->TryGetStringField(TEXT("new_parameter_name"), NewParameterName))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'new_parameter_name'"));
+	}
+	NewParameterName = NewParameterName.TrimStartAndEnd();
+	if (NewParameterName.IsEmpty())
+	{
+		return InvalidParams(Request.Id, TEXT("Parameter 'new_parameter_name' cannot be empty"));
+	}
+
+	FString NodeId;
+	Request.Params->TryGetStringField(TEXT("node_id"), NodeId);
+	FString ParameterName;
+	Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName);
+
+	bool bHasTypeFilter = false;
+	EMaterialParameterNodeType TypeFilter = EMaterialParameterNodeType::Unknown;
+	FString TypeFilterError;
+	if (!TryResolveParameterTypeFilter(Request.Params, bHasTypeFilter, TypeFilter, TypeFilterError))
+	{
+		return InvalidParams(Request.Id, TypeFilterError);
+	}
+
+	auto Task = [AssetPath, NodeId, ParameterName, NewParameterName, bHasTypeFilter, TypeFilter]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/rename_parameter only supports UMaterial assets"));
+		}
+
+		UMaterialExpression* Target = ResolveParameterExpression(Context, NodeId, ParameterName, bHasTypeFilter, TypeFilter, Error);
+		if (!Target)
+		{
+			return MakeFailure(Error);
+		}
+
+		const FName OldName = GetParameterExpressionName(Target);
+		const FName NewName = FName(*NewParameterName);
+		if (OldName.IsEqual(NewName, ENameCase::IgnoreCase))
+		{
+			TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetBoolField(TEXT("success"), true);
+			Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+			Result->SetBoolField(TEXT("changed"), false);
+			Result->SetStringField(TEXT("old_parameter_name"), OldName.ToString());
+			Result->SetStringField(TEXT("new_parameter_name"), NewName.ToString());
+			Result->SetObjectField(TEXT("parameter"), BuildParameterJson(Target));
+			return Result;
+		}
+
+		FString ConflictingNodeId;
+		if (DoesParameterNameConflict(Context, Target, NewName, ConflictingNodeId))
+		{
+			return MakeFailure(FString::Printf(TEXT("Parameter name already exists: %s (node_id=%s)"), *NewName.ToString(), *ConflictingNodeId));
+		}
+
+		Target->Modify();
+		if (!SetParameterExpressionName(Target, NewName))
+		{
+			return MakeFailure(TEXT("Target node does not expose a parameter name"));
+		}
+
+		Context.MarkDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetBoolField(TEXT("changed"), true);
+		Result->SetStringField(TEXT("old_parameter_name"), OldName.ToString());
+		Result->SetStringField(TEXT("new_parameter_name"), NewName.ToString());
+		Result->SetObjectField(TEXT("parameter"), BuildParameterJson(Target));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleSetParameterDefault(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	FString NodeId;
+	Request.Params->TryGetStringField(TEXT("node_id"), NodeId);
+	FString ParameterName;
+	Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName);
+
+	bool bHasTypeFilter = false;
+	EMaterialParameterNodeType TypeFilter = EMaterialParameterNodeType::Unknown;
+	FString TypeFilterError;
+	if (!TryResolveParameterTypeFilter(Request.Params, bHasTypeFilter, TypeFilter, TypeFilterError))
+	{
+		return InvalidParams(Request.Id, TypeFilterError);
+	}
+
+	const TSharedPtr<FJsonObject> Params = Request.Params;
+	auto Task = [AssetPath, NodeId, ParameterName, bHasTypeFilter, TypeFilter, Params]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/set_parameter_default only supports UMaterial assets"));
+		}
+
+		UMaterialExpression* Target = ResolveParameterExpression(Context, NodeId, ParameterName, bHasTypeFilter, TypeFilter, Error);
+		if (!Target)
+		{
+			return MakeFailure(Error);
+		}
+
+		const EMaterialParameterNodeType TargetType = GetParameterNodeType(Target);
+		Target->Modify();
+
+		switch (TargetType)
+		{
+		case EMaterialParameterNodeType::Scalar:
+			{
+				UMaterialExpressionScalarParameter* Scalar = Cast<UMaterialExpressionScalarParameter>(Target);
+				double Value = 0.0;
+				if (!Scalar || !Params->TryGetNumberField(TEXT("default_value"), Value))
+				{
+					return MakeFailure(TEXT("Scalar parameter requires numeric field 'default_value'"));
+				}
+				Scalar->DefaultValue = static_cast<float>(Value);
+			}
+			break;
+		case EMaterialParameterNodeType::Vector:
+			{
+				UMaterialExpressionVectorParameter* Vector = Cast<UMaterialExpressionVectorParameter>(Target);
+				if (!Vector)
+				{
+					return MakeFailure(TEXT("Target parameter is not a vector parameter"));
+				}
+				FLinearColor Color = Vector->DefaultValue;
+				if (!TryReadLinearColor(Params, TEXT("default_value"), Color, Error))
+				{
+					return MakeFailure(Error);
+				}
+				Vector->DefaultValue = Color;
+			}
+			break;
+		case EMaterialParameterNodeType::Texture:
+			{
+				UMaterialExpressionTextureSampleParameter* Texture = Cast<UMaterialExpressionTextureSampleParameter>(Target);
+				if (!Texture)
+				{
+					return MakeFailure(TEXT("Target parameter is not a texture parameter"));
+				}
+				FString TexturePath;
+				if (!Params->TryGetStringField(TEXT("texture_path"), TexturePath) && !Params->TryGetStringField(TEXT("default_texture_path"), TexturePath))
+				{
+					return MakeFailure(TEXT("Texture parameter requires 'texture_path' or 'default_texture_path'"));
+				}
+				TexturePath = TexturePath.TrimStartAndEnd();
+				Texture->Texture = TexturePath.IsEmpty() ? nullptr : LoadAssetAs<UTexture>(TexturePath);
+				if (!TexturePath.IsEmpty() && !Texture->Texture)
+				{
+					return MakeFailure(FString::Printf(TEXT("Texture asset not found: %s"), *TexturePath));
+				}
+			}
+			break;
+		case EMaterialParameterNodeType::StaticSwitch:
+			{
+				UMaterialExpressionStaticSwitchParameter* StaticSwitch = Cast<UMaterialExpressionStaticSwitchParameter>(Target);
+				bool bDefaultValue = false;
+				if (!StaticSwitch || !Params->TryGetBoolField(TEXT("default_value"), bDefaultValue))
+				{
+					return MakeFailure(TEXT("Static switch parameter requires boolean field 'default_value'"));
+				}
+				StaticSwitch->DefaultValue = bDefaultValue ? 1 : 0;
+			}
+			break;
+		case EMaterialParameterNodeType::StaticComponentMask:
+			{
+				UMaterialExpressionStaticComponentMaskParameter* StaticMask = Cast<UMaterialExpressionStaticComponentMaskParameter>(Target);
+				if (!StaticMask)
+				{
+					return MakeFailure(TEXT("Target parameter is not a static component mask parameter"));
+				}
+				bool bR = false;
+				bool bG = false;
+				bool bB = false;
+				bool bA = false;
+				if (!TryReadStaticComponentMaskDefaults(Params, bR, bG, bB, bA, Error))
+				{
+					return MakeFailure(Error);
+				}
+				StaticMask->DefaultR = bR ? 1 : 0;
+				StaticMask->DefaultG = bG ? 1 : 0;
+				StaticMask->DefaultB = bB ? 1 : 0;
+				StaticMask->DefaultA = bA ? 1 : 0;
+			}
+			break;
+		case EMaterialParameterNodeType::RuntimeVirtualTexture:
+			{
+				UMaterialExpressionRuntimeVirtualTextureSampleParameter* RuntimeVirtualTexture = Cast<UMaterialExpressionRuntimeVirtualTextureSampleParameter>(Target);
+				if (!RuntimeVirtualTexture)
+				{
+					return MakeFailure(TEXT("Target parameter is not a runtime virtual texture parameter"));
+				}
+				FString RuntimeVirtualTexturePath;
+				if (!Params->TryGetStringField(TEXT("runtime_virtual_texture_path"), RuntimeVirtualTexturePath) && !Params->TryGetStringField(TEXT("virtual_texture_path"), RuntimeVirtualTexturePath))
+				{
+					return MakeFailure(TEXT("Runtime virtual texture parameter requires 'runtime_virtual_texture_path' or 'virtual_texture_path'"));
+				}
+				RuntimeVirtualTexturePath = RuntimeVirtualTexturePath.TrimStartAndEnd();
+				RuntimeVirtualTexture->VirtualTexture = RuntimeVirtualTexturePath.IsEmpty() ? nullptr : LoadAssetAs<URuntimeVirtualTexture>(RuntimeVirtualTexturePath);
+				if (!RuntimeVirtualTexturePath.IsEmpty() && !RuntimeVirtualTexture->VirtualTexture)
+				{
+					return MakeFailure(FString::Printf(TEXT("Runtime virtual texture asset not found: %s"), *RuntimeVirtualTexturePath));
+				}
+			}
+			break;
+		case EMaterialParameterNodeType::Font:
+			{
+				UMaterialExpressionFontSampleParameter* Font = Cast<UMaterialExpressionFontSampleParameter>(Target);
+				if (!Font)
+				{
+					return MakeFailure(TEXT("Target parameter is not a font parameter"));
+				}
+
+				FString FontPath;
+				if (Params->TryGetStringField(TEXT("font_path"), FontPath) || Params->TryGetStringField(TEXT("default_font_path"), FontPath))
+				{
+					FontPath = FontPath.TrimStartAndEnd();
+					Font->Font = FontPath.IsEmpty() ? nullptr : LoadAssetAs<UFont>(FontPath);
+					if (!FontPath.IsEmpty() && !Font->Font)
+					{
+						return MakeFailure(FString::Printf(TEXT("Font asset not found: %s"), *FontPath));
+					}
+				}
+				else
+				{
+					return MakeFailure(TEXT("Font parameter requires 'font_path' or 'default_font_path'"));
+				}
+
+				double FontPageDouble = 0.0;
+				if (Params->TryGetNumberField(TEXT("font_page"), FontPageDouble))
+				{
+					Font->FontTexturePage = static_cast<int32>(FontPageDouble);
+				}
+			}
+			break;
+		default:
+			return MakeFailure(TEXT("Target node is not a supported parameter expression"));
+		}
+
+		Context.MarkDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetObjectField(TEXT("parameter"), BuildParameterJson(Target));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleSetParameterMetadata(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	FString NodeId;
+	Request.Params->TryGetStringField(TEXT("node_id"), NodeId);
+	FString ParameterName;
+	Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName);
+
+	FString GroupName;
+	const bool bHasGroup = Request.Params->TryGetStringField(TEXT("group"), GroupName);
+
+	bool bHasSortPriority = false;
+	int32 SortPriority = 0;
+	double SortPriorityDouble = 0.0;
+	if (Request.Params->TryGetNumberField(TEXT("sort_priority"), SortPriorityDouble))
+	{
+		bHasSortPriority = true;
+		SortPriority = static_cast<int32>(SortPriorityDouble);
+	}
+
+	FString Description;
+	const bool bHasDescription = Request.Params->TryGetStringField(TEXT("description"), Description);
+	if (!bHasGroup && !bHasSortPriority && !bHasDescription)
+	{
+		return InvalidParams(Request.Id, TEXT("Provide at least one metadata field: group, sort_priority, or description"));
+	}
+
+	bool bHasTypeFilter = false;
+	EMaterialParameterNodeType TypeFilter = EMaterialParameterNodeType::Unknown;
+	FString TypeFilterError;
+	if (!TryResolveParameterTypeFilter(Request.Params, bHasTypeFilter, TypeFilter, TypeFilterError))
+	{
+		return InvalidParams(Request.Id, TypeFilterError);
+	}
+
+	auto Task = [AssetPath, NodeId, ParameterName, bHasGroup, GroupName, bHasSortPriority, SortPriority, bHasDescription, Description, bHasTypeFilter, TypeFilter]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/set_parameter_metadata only supports UMaterial assets"));
+		}
+
+		UMaterialExpression* Target = ResolveParameterExpression(Context, NodeId, ParameterName, bHasTypeFilter, TypeFilter, Error);
+		if (!Target)
+		{
+			return MakeFailure(Error);
+		}
+
+		Target->Modify();
+		bool bChanged = false;
+		if (bHasGroup)
+		{
+			bChanged = SetParameterExpressionGroup(Target, GroupName.TrimStartAndEnd().IsEmpty() ? NAME_None : FName(*GroupName.TrimStartAndEnd())) || bChanged;
+		}
+		if (bHasSortPriority)
+		{
+			bChanged = SetParameterExpressionSortPriority(Target, SortPriority) || bChanged;
+		}
+		if (bHasDescription)
+		{
+			Target->Desc = Description;
+			bChanged = true;
+		}
+
+		if (bChanged)
+		{
+			Context.MarkDirty();
+		}
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetBoolField(TEXT("changed"), bChanged);
+		Result->SetObjectField(TEXT("parameter"), BuildParameterJson(Target));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
+FMCPResponse FMaterialService::HandleSetParameterChannelNames(const FMCPRequest& Request)
+{
+	if (!Request.Params.IsValid())
+	{
+		return InvalidParams(Request.Id, TEXT("Missing params object"));
+	}
+
+	FString AssetPath;
+	if (!Request.Params->TryGetStringField(TEXT("asset_path"), AssetPath))
+	{
+		return InvalidParams(Request.Id, TEXT("Missing required parameter 'asset_path'"));
+	}
+
+	FString NodeId;
+	Request.Params->TryGetStringField(TEXT("node_id"), NodeId);
+	FString ParameterName;
+	Request.Params->TryGetStringField(TEXT("parameter_name"), ParameterName);
+
+	bool bHasTypeFilter = false;
+	EMaterialParameterNodeType TypeFilter = EMaterialParameterNodeType::Unknown;
+	FString TypeFilterError;
+	if (!TryResolveParameterTypeFilter(Request.Params, bHasTypeFilter, TypeFilter, TypeFilterError))
+	{
+		return InvalidParams(Request.Id, TypeFilterError);
+	}
+
+	const TSharedPtr<FJsonObject> Params = Request.Params;
+	auto Task = [AssetPath, NodeId, ParameterName, bHasTypeFilter, TypeFilter, Params]() -> TSharedPtr<FJsonObject>
+	{
+		FMaterialGraphContext Context;
+		FString Error;
+		if (!ResolveGraphContext(AssetPath, Context, Error))
+		{
+			return MakeFailure(Error);
+		}
+		if (!Context.Material)
+		{
+			return MakeFailure(TEXT("material/set_parameter_channel_names only supports UMaterial assets"));
+		}
+
+		UMaterialExpression* Target = ResolveParameterExpression(Context, NodeId, ParameterName, bHasTypeFilter, TypeFilter, Error);
+		if (!Target)
+		{
+			return MakeFailure(Error);
+		}
+
+		const EMaterialParameterNodeType TargetType = GetParameterNodeType(Target);
+		bool bAnyFieldsSet = false;
+		if (UMaterialExpressionVectorParameter* Vector = Cast<UMaterialExpressionVectorParameter>(Target))
+		{
+			FParameterChannelNames ChannelNames = Vector->ChannelNames;
+			TryApplyChannelNameFields(Params, ChannelNames, bAnyFieldsSet);
+			if (!bAnyFieldsSet)
+			{
+				return MakeFailure(TEXT("Provide channel names via channel_names{r,g,b,a} or channel_r/channel_g/channel_b/channel_a"));
+			}
+
+			Vector->Modify();
+			Vector->ChannelNames = ChannelNames;
+		}
+		else if (UMaterialExpressionTextureSampleParameter* Texture = Cast<UMaterialExpressionTextureSampleParameter>(Target))
+		{
+			FParameterChannelNames ChannelNames = Texture->ChannelNames;
+			TryApplyChannelNameFields(Params, ChannelNames, bAnyFieldsSet);
+			if (!bAnyFieldsSet)
+			{
+				return MakeFailure(TEXT("Provide channel names via channel_names{r,g,b,a} or channel_r/channel_g/channel_b/channel_a"));
+			}
+
+			Texture->Modify();
+			Texture->ChannelNames = ChannelNames;
+			Texture->ApplyChannelNames();
+		}
+		else
+		{
+			return MakeFailure(FString::Printf(TEXT("Parameter type '%s' does not support channel names"), *ParameterTypeToString(TargetType)));
+		}
+
+		Context.MarkDirty();
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("asset_path"), Context.AssetPath);
+		Result->SetObjectField(TEXT("parameter"), BuildParameterJson(Target));
+		return Result;
+	};
+
+	return FMCPResponse::Success(Request.Id, FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task));
+}
+
 FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 {
 	auto Task = []() -> TSharedPtr<FJsonObject>
@@ -3443,6 +5103,7 @@ FMCPResponse FMaterialService::HandleCapabilities(const FMCPRequest& Request)
 		PhasesObj->SetBoolField(TEXT("phase_2_graph_management"), true);
 		PhasesObj->SetBoolField(TEXT("phase_3_pin_wiring_operations"), true);
 		PhasesObj->SetBoolField(TEXT("phase_4_material_output_authoring"), true);
+		PhasesObj->SetBoolField(TEXT("phase_5_parameter_authoring"), true);
 		Result->SetObjectField(TEXT("phases"), PhasesObj);
 
 		TSharedPtr<FJsonObject> DependenciesObj = MakeShared<FJsonObject>();
