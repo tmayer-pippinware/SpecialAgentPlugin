@@ -63,6 +63,7 @@ Native Blueprint graph tools for node-based authoring workflows:
 - `blueprint/connect_pins`
 - `blueprint/compile_blueprint`
 - `blueprint/create_blueprint`
+- `blueprint/list_blueprints`
 - `blueprint/duplicate_blueprint`
 - `blueprint/rename_blueprint`
 - `blueprint/delete_blueprint`
@@ -236,7 +237,7 @@ Your AI assistant now has access to:
 | Service | Methods | Description |
 |---------|:-------:|-------------|
 | **Python** | 3 | Execute scripts, run files, list modules |
-| **Blueprint** | 97 | Blueprint asset lifecycle, graph management, variable authoring, component SCS authoring, function/macro/dispatcher authoring, node authoring, pin operations, refactor/symbol operations, compile/diagnostics/validation, interfaces/inheritance, and transaction safety |
+| **Blueprint** | 98 | Blueprint asset lifecycle, graph management, variable authoring, component SCS authoring, function/macro/dispatcher authoring, node authoring, pin operations, refactor/symbol operations, compile/diagnostics/validation, interfaces/inheritance, transaction safety, and type coverage |
 | **Screenshot** | 2 | Capture viewport for AI vision |
 | **World** | 30+ | Actor manipulation and spatial queries |
 | **Assets** | 4 | Content Browser search and inspection |

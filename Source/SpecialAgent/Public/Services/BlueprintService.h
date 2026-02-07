@@ -29,6 +29,7 @@ public:
 
 private:
 	FMCPResponse HandleCreateBlueprint(const FMCPRequest& Request);
+	FMCPResponse HandleListBlueprints(const FMCPRequest& Request);
 	FMCPResponse HandleDuplicateBlueprint(const FMCPRequest& Request);
 	FMCPResponse HandleRenameBlueprint(const FMCPRequest& Request);
 	FMCPResponse HandleDeleteBlueprint(const FMCPRequest& Request);

@@ -39,6 +39,8 @@
 #include "Engine/EngineTypes.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
+#include "Animation/AnimBlueprint.h"
+#include "Animation/Skeleton.h"
 #include "GameFramework/Actor.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
@@ -47,6 +49,7 @@
 #include "Misc/DataValidation.h"
 #include "Misc/EngineVersion.h"
 #include "Misc/PackageName.h"
+#include "Modules/ModuleManager.h"
 
 namespace
 {
@@ -1093,6 +1096,313 @@ namespace
 	static bool BuildPinType(const FString& TypeName, FEdGraphPinType& OutType, FString& OutError)
 	{
 		return BuildPinType(TypeName, FString(), OutType, OutError);
+	}
+
+	enum class EBlueprintCreationKind : uint8
+	{
+		Auto,
+		Actor,
+		ActorComponent,
+		Widget,
+		FunctionLibrary,
+		MacroLibrary,
+		Interface,
+		Anim,
+		Generic
+	};
+
+	struct FBlueprintCreationSpec
+	{
+		FString KindName = TEXT("actor");
+		FString DefaultParentClassPath = TEXT("/Script/Engine.Actor");
+		FString BlueprintClassPath = TEXT("/Script/Engine.Blueprint");
+		FString GeneratedClassPath = TEXT("/Script/Engine.BlueprintGeneratedClass");
+		FString RequiredParentClassPath;
+		FString OptionalEditorModule;
+		EBlueprintType DefaultBlueprintType = BPTYPE_Normal;
+		bool bBlueprintTypeIsFixed = false;
+		bool bSupportsTargetSkeleton = false;
+	};
+
+	static FString BlueprintCreationKindToString(const EBlueprintCreationKind Kind)
+	{
+		switch (Kind)
+		{
+			case EBlueprintCreationKind::Actor:
+				return TEXT("actor");
+			case EBlueprintCreationKind::ActorComponent:
+				return TEXT("actor_component");
+			case EBlueprintCreationKind::Widget:
+				return TEXT("widget");
+			case EBlueprintCreationKind::FunctionLibrary:
+				return TEXT("function_library");
+			case EBlueprintCreationKind::MacroLibrary:
+				return TEXT("macro_library");
+			case EBlueprintCreationKind::Interface:
+				return TEXT("interface");
+			case EBlueprintCreationKind::Anim:
+				return TEXT("anim");
+			case EBlueprintCreationKind::Generic:
+				return TEXT("generic");
+			default:
+				return TEXT("auto");
+		}
+	}
+
+	static bool ParseBlueprintCreationKind(const FString& KindName, EBlueprintCreationKind& OutKind, FString& OutError)
+	{
+		const FString Normalized = KindName.TrimStartAndEnd().ToLower();
+
+		if (Normalized.IsEmpty() || Normalized == TEXT("auto"))
+		{
+			OutKind = EBlueprintCreationKind::Auto;
+			return true;
+		}
+		if (Normalized == TEXT("actor"))
+		{
+			OutKind = EBlueprintCreationKind::Actor;
+			return true;
+		}
+		if (Normalized == TEXT("actor_component") || Normalized == TEXT("component"))
+		{
+			OutKind = EBlueprintCreationKind::ActorComponent;
+			return true;
+		}
+		if (Normalized == TEXT("widget") || Normalized == TEXT("user_widget") || Normalized == TEXT("userwidget"))
+		{
+			OutKind = EBlueprintCreationKind::Widget;
+			return true;
+		}
+		if (Normalized == TEXT("function_library") || Normalized == TEXT("functionlibrary"))
+		{
+			OutKind = EBlueprintCreationKind::FunctionLibrary;
+			return true;
+		}
+		if (Normalized == TEXT("macro_library") || Normalized == TEXT("macrolibrary") || Normalized == TEXT("macro"))
+		{
+			OutKind = EBlueprintCreationKind::MacroLibrary;
+			return true;
+		}
+		if (Normalized == TEXT("interface"))
+		{
+			OutKind = EBlueprintCreationKind::Interface;
+			return true;
+		}
+		if (Normalized == TEXT("anim") || Normalized == TEXT("animation") || Normalized == TEXT("anim_blueprint"))
+		{
+			OutKind = EBlueprintCreationKind::Anim;
+			return true;
+		}
+		if (Normalized == TEXT("generic") || Normalized == TEXT("normal"))
+		{
+			OutKind = EBlueprintCreationKind::Generic;
+			return true;
+		}
+
+		OutError = FString::Printf(
+			TEXT("Unsupported blueprint_kind '%s'. Supported: auto, actor, actor_component, widget, function_library, macro_library, interface, anim, generic"),
+			*KindName
+		);
+		return false;
+	}
+
+	static FBlueprintCreationSpec GetBlueprintCreationSpec(const EBlueprintCreationKind Kind)
+	{
+		FBlueprintCreationSpec Spec;
+		switch (Kind)
+		{
+			case EBlueprintCreationKind::Actor:
+				Spec.KindName = TEXT("actor");
+				Spec.DefaultParentClassPath = TEXT("/Script/Engine.Actor");
+				Spec.RequiredParentClassPath = TEXT("/Script/Engine.Actor");
+				break;
+			case EBlueprintCreationKind::ActorComponent:
+				Spec.KindName = TEXT("actor_component");
+				Spec.DefaultParentClassPath = TEXT("/Script/Engine.ActorComponent");
+				Spec.RequiredParentClassPath = TEXT("/Script/Engine.ActorComponent");
+				break;
+			case EBlueprintCreationKind::Widget:
+				Spec.KindName = TEXT("widget");
+				Spec.DefaultParentClassPath = TEXT("/Script/UMG.UserWidget");
+				Spec.RequiredParentClassPath = TEXT("/Script/UMG.UserWidget");
+				Spec.BlueprintClassPath = TEXT("/Script/UMGEditor.WidgetBlueprint");
+				Spec.GeneratedClassPath = TEXT("/Script/UMG.WidgetBlueprintGeneratedClass");
+				Spec.OptionalEditorModule = TEXT("UMGEditor");
+				break;
+			case EBlueprintCreationKind::FunctionLibrary:
+				Spec.KindName = TEXT("function_library");
+				Spec.DefaultParentClassPath = TEXT("/Script/Engine.BlueprintFunctionLibrary");
+				Spec.RequiredParentClassPath = TEXT("/Script/Engine.BlueprintFunctionLibrary");
+				Spec.DefaultBlueprintType = BPTYPE_FunctionLibrary;
+				Spec.bBlueprintTypeIsFixed = true;
+				break;
+			case EBlueprintCreationKind::MacroLibrary:
+				Spec.KindName = TEXT("macro_library");
+				Spec.DefaultParentClassPath = TEXT("/Script/Engine.Actor");
+				Spec.DefaultBlueprintType = BPTYPE_MacroLibrary;
+				Spec.bBlueprintTypeIsFixed = true;
+				break;
+			case EBlueprintCreationKind::Interface:
+				Spec.KindName = TEXT("interface");
+				Spec.DefaultParentClassPath = TEXT("/Script/CoreUObject.Interface");
+				Spec.RequiredParentClassPath = TEXT("/Script/CoreUObject.Interface");
+				Spec.DefaultBlueprintType = BPTYPE_Interface;
+				Spec.bBlueprintTypeIsFixed = true;
+				break;
+			case EBlueprintCreationKind::Anim:
+				Spec.KindName = TEXT("anim");
+				Spec.DefaultParentClassPath = TEXT("/Script/Engine.AnimInstance");
+				Spec.RequiredParentClassPath = TEXT("/Script/Engine.AnimInstance");
+				Spec.BlueprintClassPath = TEXT("/Script/Engine.AnimBlueprint");
+				Spec.GeneratedClassPath = TEXT("/Script/Engine.AnimBlueprintGeneratedClass");
+				Spec.bSupportsTargetSkeleton = true;
+				break;
+			case EBlueprintCreationKind::Generic:
+				Spec.KindName = TEXT("generic");
+				Spec.DefaultParentClassPath = TEXT("/Script/CoreUObject.Object");
+				break;
+			case EBlueprintCreationKind::Auto:
+			default:
+				Spec.KindName = TEXT("actor");
+				Spec.DefaultParentClassPath = TEXT("/Script/Engine.Actor");
+				Spec.RequiredParentClassPath = TEXT("/Script/Engine.Actor");
+				break;
+		}
+
+		return Spec;
+	}
+
+	static bool IsClassChildOfResolved(UClass* CandidateClass, const TCHAR* BaseClassPath)
+	{
+		if (!CandidateClass || !BaseClassPath)
+		{
+			return false;
+		}
+
+		UClass* BaseClass = ResolveClassByNameOrPath(BaseClassPath);
+		return BaseClass && CandidateClass->IsChildOf(BaseClass);
+	}
+
+	static EBlueprintCreationKind InferBlueprintCreationKind(const EBlueprintType BlueprintType, UClass* ParentClass)
+	{
+		if (BlueprintType == BPTYPE_FunctionLibrary)
+		{
+			return EBlueprintCreationKind::FunctionLibrary;
+		}
+		if (BlueprintType == BPTYPE_MacroLibrary)
+		{
+			return EBlueprintCreationKind::MacroLibrary;
+		}
+		if (BlueprintType == BPTYPE_Interface)
+		{
+			return EBlueprintCreationKind::Interface;
+		}
+
+		if (ParentClass)
+		{
+			if (IsClassChildOfResolved(ParentClass, TEXT("/Script/Engine.AnimInstance")))
+			{
+				return EBlueprintCreationKind::Anim;
+			}
+			if (IsClassChildOfResolved(ParentClass, TEXT("/Script/UMG.UserWidget")))
+			{
+				return EBlueprintCreationKind::Widget;
+			}
+			if (IsClassChildOfResolved(ParentClass, TEXT("/Script/Engine.ActorComponent")))
+			{
+				return EBlueprintCreationKind::ActorComponent;
+			}
+			if (IsClassChildOfResolved(ParentClass, TEXT("/Script/Engine.Actor")))
+			{
+				return EBlueprintCreationKind::Actor;
+			}
+		}
+
+		return ParentClass ? EBlueprintCreationKind::Generic : EBlueprintCreationKind::Actor;
+	}
+
+	static bool ValidateBlueprintKindParentClass(UClass* ParentClass, const FBlueprintCreationSpec& Spec, FString& OutError)
+	{
+		if (!ParentClass)
+		{
+			OutError = TEXT("Parent class is null");
+			return false;
+		}
+
+		if (!Spec.RequiredParentClassPath.IsEmpty())
+		{
+			UClass* RequiredBaseClass = ResolveClassByNameOrPath(Spec.RequiredParentClassPath);
+			if (!RequiredBaseClass)
+			{
+				OutError = FString::Printf(TEXT("Required base class not available for blueprint_kind '%s': %s"), *Spec.KindName, *Spec.RequiredParentClassPath);
+				return false;
+			}
+
+			if (!ParentClass->IsChildOf(RequiredBaseClass))
+			{
+				OutError = FString::Printf(
+					TEXT("Parent class '%s' is not compatible with blueprint_kind '%s'. Expected subclass of %s"),
+					*ParentClass->GetPathName(),
+					*Spec.KindName,
+					*RequiredBaseClass->GetPathName()
+				);
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	static FString DetermineBlueprintKind(const UBlueprint* Blueprint)
+	{
+		if (!Blueprint)
+		{
+			return TEXT("unknown");
+		}
+
+		const UClass* BlueprintAssetClass = Blueprint->GetClass();
+		const FString BlueprintAssetClassName = BlueprintAssetClass ? BlueprintAssetClass->GetName().ToLower() : FString();
+		if (BlueprintAssetClassName.Contains(TEXT("widgetblueprint")))
+		{
+			return TEXT("widget");
+		}
+		if (BlueprintAssetClassName.Contains(TEXT("animblueprint")))
+		{
+			return TEXT("anim");
+		}
+
+		if (Blueprint->BlueprintType == BPTYPE_FunctionLibrary)
+		{
+			return TEXT("function_library");
+		}
+		if (Blueprint->BlueprintType == BPTYPE_MacroLibrary)
+		{
+			return TEXT("macro_library");
+		}
+		if (Blueprint->BlueprintType == BPTYPE_Interface)
+		{
+			return TEXT("interface");
+		}
+
+		UClass* ParentClass = Blueprint->ParentClass;
+		if (IsClassChildOfResolved(ParentClass, TEXT("/Script/UMG.UserWidget")))
+		{
+			return TEXT("widget");
+		}
+		if (IsClassChildOfResolved(ParentClass, TEXT("/Script/Engine.AnimInstance")))
+		{
+			return TEXT("anim");
+		}
+		if (IsClassChildOfResolved(ParentClass, TEXT("/Script/Engine.ActorComponent")))
+		{
+			return TEXT("actor_component");
+		}
+		if (IsClassChildOfResolved(ParentClass, TEXT("/Script/Engine.Actor")))
+		{
+			return TEXT("actor");
+		}
+
+		return TEXT("generic");
 	}
 
 	static bool ParseBlueprintType(const FString& TypeName, EBlueprintType& OutType, FString& OutError)
@@ -2324,15 +2634,48 @@ TArray<FMCPToolInfo> FBlueprintService::GetAvailableTools() const
 
 		TSharedPtr<FJsonObject> ParentParam = MakeShared<FJsonObject>();
 		ParentParam->SetStringField(TEXT("type"), TEXT("string"));
-		ParentParam->SetStringField(TEXT("description"), TEXT("Parent class path or class name (default: /Script/Engine.Actor)."));
+		ParentParam->SetStringField(TEXT("description"), TEXT("Parent class path or class name. If omitted, defaults are inferred from blueprint_kind."));
 		Tool.Parameters->SetObjectField(TEXT("parent_class"), ParentParam);
 
 		TSharedPtr<FJsonObject> TypeParam = MakeShared<FJsonObject>();
 		TypeParam->SetStringField(TEXT("type"), TEXT("string"));
-		TypeParam->SetStringField(TEXT("description"), TEXT("Blueprint type: normal, const, macro_library, interface, level_script, function_library."));
+		TypeParam->SetStringField(TEXT("description"), TEXT("Blueprint type override: normal, const, macro_library, interface, level_script, function_library."));
 		Tool.Parameters->SetObjectField(TEXT("blueprint_type"), TypeParam);
 
+		TSharedPtr<FJsonObject> KindParam = MakeShared<FJsonObject>();
+		KindParam->SetStringField(TEXT("type"), TEXT("string"));
+		KindParam->SetStringField(TEXT("description"), TEXT("Blueprint kind: auto (default), actor, actor_component, widget, function_library, macro_library, interface, anim, generic."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_kind"), KindParam);
+
+		TSharedPtr<FJsonObject> SkeletonParam = MakeShared<FJsonObject>();
+		SkeletonParam->SetStringField(TEXT("type"), TEXT("string"));
+		SkeletonParam->SetStringField(TEXT("description"), TEXT("Optional skeleton asset path for anim blueprints (e.g. /Game/Characters/SK_Mannequin_Skeleton.SK_Mannequin_Skeleton)."));
+		Tool.Parameters->SetObjectField(TEXT("target_skeleton"), SkeletonParam);
+
 		Tool.RequiredParams.Add(TEXT("blueprint_path"));
+		Tools.Add(Tool);
+	}
+
+	{
+		FMCPToolInfo Tool;
+		Tool.Name = TEXT("list_blueprints");
+		Tool.Description = TEXT("List Blueprint assets, optionally filtered by blueprint_kind.");
+
+		TSharedPtr<FJsonObject> RootParam = MakeShared<FJsonObject>();
+		RootParam->SetStringField(TEXT("type"), TEXT("string"));
+		RootParam->SetStringField(TEXT("description"), TEXT("Root content path to scan (default: /Game)."));
+		Tool.Parameters->SetObjectField(TEXT("root_path"), RootParam);
+
+		TSharedPtr<FJsonObject> KindParam = MakeShared<FJsonObject>();
+		KindParam->SetStringField(TEXT("type"), TEXT("string"));
+		KindParam->SetStringField(TEXT("description"), TEXT("Optional filter: actor, actor_component, widget, function_library, macro_library, interface, anim, generic."));
+		Tool.Parameters->SetObjectField(TEXT("blueprint_kind"), KindParam);
+
+		TSharedPtr<FJsonObject> RecursiveParam = MakeShared<FJsonObject>();
+		RecursiveParam->SetStringField(TEXT("type"), TEXT("boolean"));
+		RecursiveParam->SetStringField(TEXT("description"), TEXT("If true (default), scan recursively under root_path."));
+		Tool.Parameters->SetObjectField(TEXT("recursive"), RecursiveParam);
+
 		Tools.Add(Tool);
 	}
 
@@ -5027,6 +5370,7 @@ TArray<FMCPToolInfo> FBlueprintService::GetAvailableTools() const
 FMCPResponse FBlueprintService::HandleRequest(const FMCPRequest& Request, const FString& MethodName)
 {
 	if (MethodName == TEXT("create_blueprint")) return HandleCreateBlueprint(Request);
+	if (MethodName == TEXT("list_blueprints")) return HandleListBlueprints(Request);
 	if (MethodName == TEXT("duplicate_blueprint")) return HandleDuplicateBlueprint(Request);
 	if (MethodName == TEXT("rename_blueprint")) return HandleRenameBlueprint(Request);
 	if (MethodName == TEXT("delete_blueprint")) return HandleDeleteBlueprint(Request);
@@ -5264,24 +5608,38 @@ FMCPResponse FBlueprintService::HandleCreateBlueprint(const FMCPRequest& Request
 	}
 
 	FString BlueprintPath;
-	FString ParentClassPath = TEXT("/Script/Engine.Actor");
+	FString ParentClassPath;
 	FString BlueprintTypeName = TEXT("normal");
+	FString BlueprintKindName = TEXT("auto");
+	FString TargetSkeletonPath;
 
 	if (!Request.Params->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
 	{
 		return InvalidParams(Request.Id, TEXT("Missing required parameter 'blueprint_path'"));
 	}
-	Request.Params->TryGetStringField(TEXT("parent_class"), ParentClassPath);
-	Request.Params->TryGetStringField(TEXT("blueprint_type"), BlueprintTypeName);
 
-	EBlueprintType BlueprintType = BPTYPE_Normal;
+	const bool bParentClassFieldPresent = Request.Params->HasField(TEXT("parent_class")) && Request.Params->TryGetStringField(TEXT("parent_class"), ParentClassPath);
+	const bool bHasParentClass = bParentClassFieldPresent && !ParentClassPath.TrimStartAndEnd().IsEmpty();
+	const bool bHasBlueprintType = Request.Params->HasField(TEXT("blueprint_type")) && Request.Params->TryGetStringField(TEXT("blueprint_type"), BlueprintTypeName);
+	const bool bHasBlueprintKind = Request.Params->HasField(TEXT("blueprint_kind")) && Request.Params->TryGetStringField(TEXT("blueprint_kind"), BlueprintKindName);
+	Request.Params->TryGetStringField(TEXT("target_skeleton"), TargetSkeletonPath);
+
+	EBlueprintType ParsedBlueprintType = BPTYPE_Normal;
 	FString BlueprintTypeError;
-	if (!ParseBlueprintType(BlueprintTypeName, BlueprintType, BlueprintTypeError))
+	if (!ParseBlueprintType(BlueprintTypeName, ParsedBlueprintType, BlueprintTypeError))
 	{
 		return InvalidParams(Request.Id, BlueprintTypeError);
 	}
 
-	auto Task = [BlueprintPath, ParentClassPath, BlueprintType]() -> TSharedPtr<FJsonObject>
+	EBlueprintCreationKind RequestedBlueprintKind = EBlueprintCreationKind::Auto;
+	const FString BlueprintKindInput = bHasBlueprintKind ? BlueprintKindName : TEXT("auto");
+	FString BlueprintKindError;
+	if (!ParseBlueprintCreationKind(BlueprintKindInput, RequestedBlueprintKind, BlueprintKindError))
+	{
+		return InvalidParams(Request.Id, BlueprintKindError);
+	}
+
+	auto Task = [BlueprintPath, ParentClassPath, bHasParentClass, ParsedBlueprintType, bHasBlueprintType, RequestedBlueprintKind, TargetSkeletonPath]() -> TSharedPtr<FJsonObject>
 	{
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
@@ -5305,14 +5663,88 @@ FMCPResponse FBlueprintService::HandleCreateBlueprint(const FMCPRequest& Request
 			return Fail(FString::Printf(TEXT("Blueprint already exists: %s"), *AssetPath));
 		}
 
-		UClass* ParentClass = ResolveClass(ParentClassPath);
+		EBlueprintType EffectiveBlueprintType = ParsedBlueprintType;
+		EBlueprintCreationKind EffectiveBlueprintKind = RequestedBlueprintKind;
+
+		UClass* ParentClass = nullptr;
+		FString TrimmedParentClassPath = ParentClassPath.TrimStartAndEnd();
+		if (bHasParentClass)
+		{
+			ParentClass = ResolveClass(TrimmedParentClassPath);
+			if (!ParentClass)
+			{
+				return Fail(FString::Printf(TEXT("Parent class not found: %s"), *TrimmedParentClassPath));
+			}
+		}
+
+		if (EffectiveBlueprintKind == EBlueprintCreationKind::Auto)
+		{
+			EffectiveBlueprintKind = InferBlueprintCreationKind(EffectiveBlueprintType, ParentClass);
+		}
+
+		const FBlueprintCreationSpec CreationSpec = GetBlueprintCreationSpec(EffectiveBlueprintKind);
+		if (!bHasBlueprintType)
+		{
+			EffectiveBlueprintType = CreationSpec.DefaultBlueprintType;
+		}
+		if (CreationSpec.bBlueprintTypeIsFixed && EffectiveBlueprintType != CreationSpec.DefaultBlueprintType)
+		{
+			return Fail(FString::Printf(
+				TEXT("blueprint_kind '%s' requires blueprint_type '%s'"),
+				*CreationSpec.KindName,
+				*BlueprintTypeToString(CreationSpec.DefaultBlueprintType)
+			));
+		}
+
+		if (!CreationSpec.OptionalEditorModule.IsEmpty())
+		{
+			FModuleManager::Get().LoadModule(*CreationSpec.OptionalEditorModule);
+		}
+
 		if (!ParentClass)
 		{
-			return Fail(FString::Printf(TEXT("Parent class not found: %s"), *ParentClassPath));
+			const FString EffectiveParentPath = CreationSpec.DefaultParentClassPath;
+			ParentClass = ResolveClass(EffectiveParentPath);
+			if (!ParentClass)
+			{
+				return Fail(FString::Printf(TEXT("Parent class not found: %s"), *EffectiveParentPath));
+			}
 		}
-		if (!FKismetEditorUtilities::CanCreateBlueprintOfClass(ParentClass))
+
+		FString ParentValidationError;
+		if (!ValidateBlueprintKindParentClass(ParentClass, CreationSpec, ParentValidationError))
+		{
+			return Fail(ParentValidationError);
+		}
+		if (!ParentClass)
+		{
+			return Fail(TEXT("Failed to resolve parent class"));
+		}
+		const bool bCanCreateBlueprintFromParent = FKismetEditorUtilities::CanCreateBlueprintOfClass(ParentClass);
+		const bool bAllowNonBlueprintableParent = EffectiveBlueprintKind == EBlueprintCreationKind::FunctionLibrary;
+		if (!bCanCreateBlueprintFromParent && !bAllowNonBlueprintableParent)
 		{
 			return Fail(FString::Printf(TEXT("Cannot create Blueprint from parent class: %s"), *ParentClass->GetPathName()));
+		}
+
+		UClass* BlueprintAssetClass = ResolveClassByNameOrPath(CreationSpec.BlueprintClassPath);
+		if (!BlueprintAssetClass || !BlueprintAssetClass->IsChildOf(UBlueprint::StaticClass()))
+		{
+			return Fail(FString::Printf(
+				TEXT("Blueprint asset class unavailable for blueprint_kind '%s': %s"),
+				*CreationSpec.KindName,
+				*CreationSpec.BlueprintClassPath
+			));
+		}
+
+		UClass* BlueprintGeneratedClassType = ResolveClassByNameOrPath(CreationSpec.GeneratedClassPath);
+		if (!BlueprintGeneratedClassType || !BlueprintGeneratedClassType->IsChildOf(UBlueprintGeneratedClass::StaticClass()))
+		{
+			return Fail(FString::Printf(
+				TEXT("Blueprint generated class unavailable for blueprint_kind '%s': %s"),
+				*CreationSpec.KindName,
+				*CreationSpec.GeneratedClassPath
+			));
 		}
 
 		UPackage* Package = CreatePackage(*AssetPath);
@@ -5326,15 +5758,39 @@ FMCPResponse FBlueprintService::HandleCreateBlueprint(const FMCPRequest& Request
 			ParentClass,
 			Package,
 			AssetName,
-			BlueprintType,
-			UBlueprint::StaticClass(),
-			UBlueprintGeneratedClass::StaticClass(),
+			EffectiveBlueprintType,
+			BlueprintAssetClass,
+			BlueprintGeneratedClassType,
 			FName(TEXT("SpecialAgent"))
 		);
 
 		if (!Blueprint)
 		{
 			return Fail(FString::Printf(TEXT("Failed to create Blueprint: %s"), *AssetPath));
+		}
+
+		const FString TrimmedSkeletonPath = TargetSkeletonPath.TrimStartAndEnd();
+		if (!TrimmedSkeletonPath.IsEmpty())
+		{
+			if (!CreationSpec.bSupportsTargetSkeleton)
+			{
+				return Fail(TEXT("target_skeleton is only supported for blueprint_kind 'anim'"));
+			}
+
+			USkeleton* TargetSkeleton = ResolveObjectByNameOrPath<USkeleton>(TrimmedSkeletonPath);
+			if (!TargetSkeleton)
+			{
+				return Fail(FString::Printf(TEXT("Skeleton not found: %s"), *TrimmedSkeletonPath));
+			}
+
+			UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>(Blueprint);
+			if (!AnimBlueprint)
+			{
+				return Fail(TEXT("Created Blueprint does not support target skeleton assignment"));
+			}
+
+			AnimBlueprint->Modify();
+			AnimBlueprint->TargetSkeleton = TargetSkeleton;
 		}
 
 		FAssetRegistryModule::AssetCreated(Blueprint);
@@ -5344,6 +5800,146 @@ FMCPResponse FBlueprintService::HandleCreateBlueprint(const FMCPRequest& Request
 		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(AssetPath));
 		Result->SetStringField(TEXT("parent_class"), ParentClass->GetPathName());
 		Result->SetStringField(TEXT("blueprint_type"), BlueprintTypeToString(Blueprint->BlueprintType));
+		Result->SetStringField(TEXT("blueprint_kind"), DetermineBlueprintKind(Blueprint));
+		Result->SetStringField(TEXT("asset_class"), Blueprint->GetClass()->GetPathName());
+		if (Blueprint->GeneratedClass)
+		{
+			Result->SetStringField(TEXT("generated_class"), Blueprint->GeneratedClass->GetPathName());
+		}
+		if (!TrimmedSkeletonPath.IsEmpty())
+		{
+			const UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>(Blueprint);
+			Result->SetStringField(
+				TEXT("target_skeleton"),
+				AnimBlueprint && AnimBlueprint->TargetSkeleton ? AnimBlueprint->TargetSkeleton->GetPathName() : FString()
+			);
+		}
+		return Result;
+	};
+
+	TSharedPtr<FJsonObject> Result = FGameThreadDispatcher::DispatchToGameThreadSyncWithReturn<TSharedPtr<FJsonObject>>(Task);
+	return FMCPResponse::Success(Request.Id, Result);
+}
+
+FMCPResponse FBlueprintService::HandleListBlueprints(const FMCPRequest& Request)
+{
+	FString RootPath = TEXT("/Game");
+	FString BlueprintKindName;
+	bool bRecursive = true;
+
+	if (Request.Params.IsValid())
+	{
+		Request.Params->TryGetStringField(TEXT("root_path"), RootPath);
+		Request.Params->TryGetStringField(TEXT("blueprint_kind"), BlueprintKindName);
+		Request.Params->TryGetBoolField(TEXT("recursive"), bRecursive);
+	}
+
+	const FString TrimmedKind = BlueprintKindName.TrimStartAndEnd();
+	bool bFilterByKind = !TrimmedKind.IsEmpty() && !TrimmedKind.Equals(TEXT("all"), ESearchCase::IgnoreCase) && !TrimmedKind.Equals(TEXT("any"), ESearchCase::IgnoreCase);
+	EBlueprintCreationKind ParsedKindFilter = EBlueprintCreationKind::Auto;
+	if (bFilterByKind)
+	{
+		FString KindError;
+		if (!ParseBlueprintCreationKind(TrimmedKind, ParsedKindFilter, KindError))
+		{
+			return InvalidParams(Request.Id, KindError.IsEmpty() ? TEXT("Invalid blueprint_kind filter") : KindError);
+		}
+		if (ParsedKindFilter == EBlueprintCreationKind::Auto)
+		{
+			bFilterByKind = false;
+		}
+	}
+
+	auto Task = [RootPath, bRecursive, bFilterByKind, ParsedKindFilter]() -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		auto Fail = [&Result](const FString& Error) -> TSharedPtr<FJsonObject>
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), Error);
+			return Result;
+		};
+
+		FString EffectiveRootPath = RootPath.TrimStartAndEnd();
+		if (EffectiveRootPath.IsEmpty())
+		{
+			EffectiveRootPath = TEXT("/Game");
+		}
+
+		if (!FPackageName::IsValidLongPackageName(EffectiveRootPath))
+		{
+			return Fail(FString::Printf(TEXT("Invalid root_path: %s"), *EffectiveRootPath));
+		}
+
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		FARFilter Filter;
+		Filter.PackagePaths.Add(*EffectiveRootPath);
+		Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+		Filter.bRecursivePaths = bRecursive;
+		Filter.bRecursiveClasses = true;
+
+		TArray<FAssetData> AssetDatas;
+		AssetRegistryModule.Get().GetAssets(Filter, AssetDatas);
+
+		const FString KindFilter = bFilterByKind ? BlueprintCreationKindToString(ParsedKindFilter) : FString();
+		TArray<TSharedPtr<FJsonValue>> BlueprintsJson;
+		BlueprintsJson.Reserve(AssetDatas.Num());
+
+		int32 SkippedAssetCount = 0;
+		for (const FAssetData& AssetData : AssetDatas)
+		{
+			UObject* AssetObject = AssetData.GetAsset();
+			UBlueprint* Blueprint = Cast<UBlueprint>(AssetObject);
+			if (!Blueprint)
+			{
+				++SkippedAssetCount;
+				continue;
+			}
+
+			const FString BlueprintKind = DetermineBlueprintKind(Blueprint);
+			if (bFilterByKind && !BlueprintKind.Equals(KindFilter, ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> BlueprintObj = MakeShared<FJsonObject>();
+			BlueprintObj->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(Blueprint->GetPathName()));
+			BlueprintObj->SetStringField(TEXT("asset_path"), NormalizeBlueprintAssetPath(Blueprint->GetPathName()));
+			BlueprintObj->SetStringField(TEXT("asset_name"), Blueprint->GetName());
+			BlueprintObj->SetStringField(TEXT("asset_class"), Blueprint->GetClass()->GetPathName());
+			BlueprintObj->SetStringField(TEXT("blueprint_type"), BlueprintTypeToString(Blueprint->BlueprintType));
+			BlueprintObj->SetStringField(TEXT("blueprint_kind"), BlueprintKind);
+			BlueprintObj->SetNumberField(TEXT("status"), static_cast<int32>(Blueprint->Status));
+			BlueprintObj->SetStringField(TEXT("status_name"), BlueprintStatusToString(Blueprint->Status));
+			BlueprintObj->SetBoolField(TEXT("is_data_only"), FBlueprintEditorUtils::IsDataOnlyBlueprint(Blueprint));
+			if (Blueprint->ParentClass)
+			{
+				BlueprintObj->SetStringField(TEXT("parent_class"), Blueprint->ParentClass->GetPathName());
+			}
+			if (Blueprint->GeneratedClass)
+			{
+				BlueprintObj->SetStringField(TEXT("generated_class"), Blueprint->GeneratedClass->GetPathName());
+			}
+			if (const UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>(Blueprint))
+			{
+				BlueprintObj->SetStringField(TEXT("target_skeleton"), AnimBlueprint->TargetSkeleton ? AnimBlueprint->TargetSkeleton->GetPathName() : TEXT(""));
+			}
+
+			BlueprintsJson.Add(MakeShared<FJsonValueObject>(BlueprintObj));
+		}
+
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("root_path"), EffectiveRootPath);
+		Result->SetBoolField(TEXT("recursive"), bRecursive);
+		Result->SetBoolField(TEXT("filter_by_kind"), bFilterByKind);
+		if (bFilterByKind)
+		{
+			Result->SetStringField(TEXT("blueprint_kind"), KindFilter);
+		}
+		Result->SetArrayField(TEXT("blueprints"), BlueprintsJson);
+		Result->SetNumberField(TEXT("asset_count"), AssetDatas.Num());
+		Result->SetNumberField(TEXT("blueprint_count"), BlueprintsJson.Num());
+		Result->SetNumberField(TEXT("skipped_assets"), SkippedAssetCount);
 		return Result;
 	};
 
@@ -5691,8 +6287,10 @@ FMCPResponse FBlueprintService::HandleGetBlueprintInfo(const FMCPRequest& Reques
 		Result->SetStringField(TEXT("blueprint_path"), NormalizeBlueprintPath(BlueprintPath));
 		Result->SetStringField(TEXT("asset_path"), NormalizeBlueprintAssetPath(BlueprintPath));
 		Result->SetStringField(TEXT("asset_name"), Blueprint->GetName());
+		Result->SetStringField(TEXT("asset_class"), Blueprint->GetClass()->GetPathName());
 		Result->SetStringField(TEXT("package_name"), Blueprint->GetOutermost() ? Blueprint->GetOutermost()->GetName() : TEXT("None"));
 		Result->SetStringField(TEXT("blueprint_type"), BlueprintTypeToString(Blueprint->BlueprintType));
+		Result->SetStringField(TEXT("blueprint_kind"), DetermineBlueprintKind(Blueprint));
 		Result->SetNumberField(TEXT("status"), static_cast<int32>(Blueprint->Status));
 		Result->SetStringField(TEXT("status_name"), BlueprintStatusToString(Blueprint->Status));
 		Result->SetBoolField(TEXT("is_data_only"), FBlueprintEditorUtils::IsDataOnlyBlueprint(Blueprint));
@@ -5717,6 +6315,10 @@ FMCPResponse FBlueprintService::HandleGetBlueprintInfo(const FMCPRequest& Reques
 		if (SkeletonClass)
 		{
 			Result->SetStringField(TEXT("skeleton_class"), SkeletonClass->GetPathName());
+		}
+		if (const UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>(Blueprint))
+		{
+			Result->SetStringField(TEXT("target_skeleton"), AnimBlueprint->TargetSkeleton ? AnimBlueprint->TargetSkeleton->GetPathName() : TEXT(""));
 		}
 
 		TSharedPtr<FJsonObject> ClassFlagsObj = MakeShared<FJsonObject>();
@@ -15087,6 +15689,28 @@ FMCPResponse FBlueprintService::HandleCapabilities(const FMCPRequest& Request)
 		FeaturesObj->SetBoolField(TEXT("dry_run_validate"), true);
 		FeaturesObj->SetBoolField(TEXT("capabilities"), true);
 		Result->SetObjectField(TEXT("phase11_tools"), FeaturesObj);
+
+		UClass* WidgetBlueprintClass = ResolveClassByNameOrPath(TEXT("/Script/UMGEditor.WidgetBlueprint"));
+		if (!WidgetBlueprintClass)
+		{
+			FModuleManager::Get().LoadModule(TEXT("UMGEditor"));
+			WidgetBlueprintClass = ResolveClassByNameOrPath(TEXT("/Script/UMGEditor.WidgetBlueprint"));
+		}
+		const bool bWidgetBlueprintSupported = WidgetBlueprintClass && WidgetBlueprintClass->IsChildOf(UBlueprint::StaticClass());
+		const bool bAnimBlueprintSupported = ResolveClassByNameOrPath(TEXT("/Script/Engine.AnimBlueprint")) != nullptr;
+
+		TSharedPtr<FJsonObject> TypeCoverageObj = MakeShared<FJsonObject>();
+		TypeCoverageObj->SetBoolField(TEXT("actor"), true);
+		TypeCoverageObj->SetBoolField(TEXT("actor_component"), true);
+		TypeCoverageObj->SetBoolField(TEXT("widget"), bWidgetBlueprintSupported);
+		TypeCoverageObj->SetBoolField(TEXT("function_library"), true);
+		TypeCoverageObj->SetBoolField(TEXT("macro_library"), true);
+		TypeCoverageObj->SetBoolField(TEXT("interface"), true);
+		TypeCoverageObj->SetBoolField(TEXT("anim"), bAnimBlueprintSupported);
+		TypeCoverageObj->SetBoolField(TEXT("create_blueprint_kind_param"), true);
+		TypeCoverageObj->SetBoolField(TEXT("list_blueprints"), true);
+		TypeCoverageObj->SetBoolField(TEXT("compile_diagnostics"), true);
+		Result->SetObjectField(TEXT("phase12_type_coverage"), TypeCoverageObj);
 
 		TSharedPtr<FJsonObject> SafetyObj = MakeShared<FJsonObject>();
 		SafetyObj->SetBoolField(TEXT("single_managed_transaction"), true);
